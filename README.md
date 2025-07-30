@@ -44,7 +44,7 @@ We are excited to introduce **Wan2.2**, a major upgrade to our foundational vide
 If your research or project builds upon [**Wan2.1**](https://github.com/Wan-Video/Wan2.1) or [**Wan2.2**](https://github.com/Wan-Video/Wan2.2), and you would like more people to see it, please inform us.
 
 - [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio) provides comprehensive support for Wan 2.2, including low-GPU-memory layer-by-layer offload, FP8 quantization, sequence parallelism, LoRA training, full training.
-
+- EasyCache (Training-Free Video Diffusion Acceleration via Runtime-Adaptive Caching): [EasyCache](https://github.com/H-EmbodVis/EasyCache) by [Dingkang Liang](https://github.com/dk-liang) and [Xin Zhou](https://github.com/LMD0311)
 
 ## 📑 Todo List
 - Wan2.2 Text-to-Video
