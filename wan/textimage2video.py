@@ -28,6 +28,11 @@ from .utils.fm_solvers import (
     retrieve_timesteps,
 )
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+from .utils.fm_solvers_euler import EulerScheduler
+from .utils.utils import model_safe_downcast, load_and_merge_lora_weight_from_safetensors, use_cfg
+
+
+
 from .utils.utils import best_output_size, masks_like
 
 
@@ -37,6 +42,7 @@ class WanTI2V:
         self,
         config,
         checkpoint_dir,
+        lora_dir,
         device_id=0,
         rank=0,
         t5_fsdp=False,
@@ -101,6 +107,9 @@ class WanTI2V:
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.model = WanModel.from_pretrained(checkpoint_dir)
+        if lora_dir:
+            lora_path = os.path.join(lora_dir, config.lora_checkpoint)
+            self.model = load_and_merge_lora_weight_from_safetensors(self.model, lora_path, alpha=8)
         self.model = self._configure_model(
             model=self.model,
             use_sp=use_sp,
@@ -152,8 +161,11 @@ class WanTI2V:
         if dit_fsdp:
             model = shard_fn(model)
         else:
-            if convert_model_dtype:
-                model.to(self.param_dtype)
+            model_safe_downcast(
+                model,
+                dtype=self.param_dtype,
+                keep_in_fp32_modules=[],
+                keep_in_fp32_parameters=model._keep_in_fp32_params)
             if not self.init_on_cpu:
                 model.to(self.device)
 
@@ -331,7 +343,6 @@ class WanTI2V:
                 torch.no_grad(),
                 no_sync(),
         ):
-
             if sample_solver == 'unipc':
                 sample_scheduler = FlowUniPCMultistepScheduler(
                     num_train_timesteps=self.num_train_timesteps,
@@ -350,6 +361,14 @@ class WanTI2V:
                     sample_scheduler,
                     device=self.device,
                     sigmas=sampling_sigmas)
+            elif sample_solver == "euler":
+                sample_scheduler = EulerScheduler(
+                    num_train_timesteps=self.num_train_timesteps,
+                    shift=shift,
+                    device=self.device)
+                sample_scheduler.set_timesteps(
+                    sampling_steps, device=self.device)
+                timesteps = sample_scheduler.timesteps[:-1].clone()
             else:
                 raise NotImplementedError("Unsupported solver.")
 
@@ -379,11 +398,14 @@ class WanTI2V:
 
                 noise_pred_cond = self.model(
                     latent_model_input, t=timestep, **arg_c)[0]
-                noise_pred_uncond = self.model(
-                    latent_model_input, t=timestep, **arg_null)[0]
+                if use_cfg(guide_scale):
+                    noise_pred_uncond = self.model(
+                        latent_model_input, t=timestep, **arg_null)[0]
 
-                noise_pred = noise_pred_uncond + guide_scale * (
-                    noise_pred_cond - noise_pred_uncond)
+                    noise_pred = noise_pred_uncond + guide_scale * (
+                        noise_pred_cond - noise_pred_uncond)
+                else:
+                    noise_pred = noise_pred_cond
 
                 temp_x0 = sample_scheduler.step(
                     noise_pred.unsqueeze(0),
@@ -523,7 +545,6 @@ class WanTI2V:
                 torch.no_grad(),
                 no_sync(),
         ):
-
             if sample_solver == 'unipc':
                 sample_scheduler = FlowUniPCMultistepScheduler(
                     num_train_timesteps=self.num_train_timesteps,
@@ -542,6 +563,14 @@ class WanTI2V:
                     sample_scheduler,
                     device=self.device,
                     sigmas=sampling_sigmas)
+            elif sample_solver == "euler":
+                sample_scheduler = EulerScheduler(
+                    num_train_timesteps=self.num_train_timesteps,
+                    shift=shift,
+                    device=self.device)
+                sample_scheduler.set_timesteps(
+                    sampling_steps, device=self.device)
+                timesteps = sample_scheduler.timesteps[:-1].clone()
             else:
                 raise NotImplementedError("Unsupported solver.")
 
@@ -581,12 +610,15 @@ class WanTI2V:
                     latent_model_input, t=timestep, **arg_c)[0]
                 if offload_model:
                     torch.cuda.empty_cache()
-                noise_pred_uncond = self.model(
-                    latent_model_input, t=timestep, **arg_null)[0]
-                if offload_model:
-                    torch.cuda.empty_cache()
-                noise_pred = noise_pred_uncond + guide_scale * (
-                    noise_pred_cond - noise_pred_uncond)
+                if use_cfg(guide_scale):
+                    noise_pred_uncond = self.model(
+                        latent_model_input, t=timestep, **arg_null)[0]
+                    if offload_model:
+                        torch.cuda.empty_cache()
+                    noise_pred = noise_pred_uncond + guide_scale * (
+                        noise_pred_cond - noise_pred_uncond)
+                else:
+                    noise_pred = noise_pred_cond
 
                 temp_x0 = sample_scheduler.step(
                     noise_pred.unsqueeze(0),

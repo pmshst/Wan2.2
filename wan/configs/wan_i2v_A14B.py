@@ -32,6 +32,10 @@ i2v_A14B.high_noise_checkpoint = 'high_noise_model'
 
 # inference
 i2v_A14B.sample_shift = 5.0
-i2v_A14B.sample_steps = 40
+i2v_A14B.sample_steps = 4
 i2v_A14B.boundary = 0.900
-i2v_A14B.sample_guide_scale = (3.5, 3.5)  # low noise, high noise
+i2v_A14B.sample_guide_scale = (1.0, 1.0)  # low noise, high noise
+
+# lora
+i2v_A14B.low_noise_lora_checkpoint = 'low_noise_model.safetensors'
+i2v_A14B.high_noise_lora_checkpoint = 'high_noise_model.safetensors'

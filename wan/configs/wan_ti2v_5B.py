@@ -31,6 +31,9 @@ ti2v_5B.eps = 1e-6
 # inference
 ti2v_5B.sample_fps = 24
 ti2v_5B.sample_shift = 5.0
-ti2v_5B.sample_steps = 50
-ti2v_5B.sample_guide_scale = 5.0
+ti2v_5B.sample_steps = 4
+ti2v_5B.sample_guide_scale = 1.0
 ti2v_5B.frame_num = 121
+
+# lora
+ti2v_5B.lora_checkpoint = 'diffusion_pytorch_model.safetensors'

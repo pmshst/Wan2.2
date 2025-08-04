@@ -37,6 +37,21 @@ EXAMPLE_PROMPT = {
     },
 }
 
+def save_video_to_file(video, save_dir:str, test_idx:int, seed:int, prompt:str, task:str, fps:float):
+    formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    formatted_prompt = prompt.replace(" ", "_").replace("/", "_")[:50]
+    suffix = '.mp4'
+    file_name = f"{task}_{test_idx:04d}_seed{seed}_{formatted_prompt}_{formatted_time}{suffix}"
+    save_file = os.path.join(save_dir, file_name)
+    logging.info(f"Saving generated video to {save_file}")
+    save_video(
+        tensor=video[None],
+        save_file=save_file,
+        fps=fps,
+        nrow=1,
+        normalize=True,
+        value_range=(-1, 1))
+    return 0
 
 def _validate_args(args):
     # Basic check
@@ -50,7 +65,7 @@ def _validate_args(args):
         args.image = EXAMPLE_PROMPT[args.task]["image"]
 
     if args.task == "i2v-A14B":
-        assert args.image is not None, "Please specify the image path for i2v."
+        assert args.image is not None or args.image_path_file is not None, "Please specify the image path for i2v."
 
     cfg = WAN_CONFIGS[args.task]
 
@@ -65,6 +80,9 @@ def _validate_args(args):
 
     if args.frame_num is None:
         args.frame_num = cfg.frame_num
+    
+    if args.sample_solver != "euler":
+        warnings.warn(f"Please use euler solver because it's used in distillation")
 
     args.base_seed = args.base_seed if args.base_seed >= 0 else random.randint(
         0, sys.maxsize)
@@ -103,6 +121,16 @@ def _parse_args():
         default=None,
         help="The path to the checkpoint directory.")
     parser.add_argument(
+        "--lora_dir",
+        type=str,
+        default=None,
+        help="The path to the lora directory.")
+    parser.add_argument(
+        "--save_dir",
+        type=str,
+        default="test_results",
+        help="The path to the lora directory.")
+    parser.add_argument(
         "--offload_model",
         type=str2bool,
         default=None,
@@ -139,6 +167,11 @@ def _parse_args():
         default=None,
         help="The prompt to generate the video from.")
     parser.add_argument(
+        "--prompt_file",
+        type=str,
+        default=None,
+        help="A txt file of the prompt list.")
+    parser.add_argument(
         "--use_prompt_extend",
         action="store_true",
         default=False,
@@ -171,10 +204,15 @@ def _parse_args():
         default=None,
         help="The image to generate the video from.")
     parser.add_argument(
+        "--image_path_file",
+        type=str,
+        default=None,
+        help="A txt file of the image path list")
+    parser.add_argument(
         "--sample_solver",
         type=str,
-        default='unipc',
-        choices=['unipc', 'dpm++'],
+        default='euler',
+        choices=['euler', 'unipc', 'dpm++'],
         help="The solver used to sample.")
     parser.add_argument(
         "--sample_steps", type=int, default=None, help="The sampling steps.")
@@ -219,6 +257,8 @@ def generate(args):
     local_rank = int(os.getenv("LOCAL_RANK", 0))
     device = local_rank
     _init_logging(rank)
+    if rank == 0:
+        os.makedirs(args.save_dir, exist_ok=True)
 
     if args.offload_model is None:
         args.offload_model = False if world_size > 1 else True
@@ -271,34 +311,50 @@ def generate(args):
         dist.broadcast_object_list(base_seed, src=0)
         args.base_seed = base_seed[0]
 
-    logging.info(f"Input prompt: {args.prompt}")
-    img = None
-    if args.image is not None:
-        img = Image.open(args.image).convert("RGB")
-        logging.info(f"Input image: {args.image}")
+    if args.prompt_file is not None and os.path.isfile(args.prompt_file):
+        with open(args.prompt_file, 'r') as f:
+            prompt_list = f.read().splitlines()
+    else:
+        prompt_list = [args.prompt]
 
+    # logging.info(f"Input prompt: {args.prompt}")
+    if args.image_path_file is not None and os.path.isfile(args.image_path_file):
+        with open(args.image_path_file, 'r') as f:
+            image_path_list = f.read().splitlines()
+    elif args.image is not None:
+        image_path_list = [args.image]
+    else:
+        image_path_list = [None] * len(prompt_list)
+    
+    image_list = []
+    for image_path in image_path_list:
+        if image_path is not None:
+            image_list.append(Image.open(image_path).convert("RGB"))
+        else:
+            image_list.append(None)
+    assert len(prompt_list) == len(image_list), "Please make sure the length of prompt_list and the image_list be the same."
     # prompt extend
     if args.use_prompt_extend:
         logging.info("Extending prompt ...")
         if rank == 0:
-            prompt_output = prompt_expander(
-                args.prompt,
-                image=img,
-                tar_lang=args.prompt_extend_target_lang,
-                seed=args.base_seed)
-            if prompt_output.status == False:
-                logging.info(
-                    f"Extending prompt failed: {prompt_output.message}")
-                logging.info("Falling back to original prompt.")
-                input_prompt = args.prompt
-            else:
-                input_prompt = prompt_output.prompt
-            input_prompt = [input_prompt]
+            for i, (prompt, img) in enumerate(zip(prompt_list, image_list)):
+                prompt_output = prompt_expander(
+                    args.prompt,
+                    image=img,
+                    tar_lang=args.prompt_extend_target_lang,
+                    seed=args.base_seed)
+                if prompt_output.status == False:
+                    logging.info(
+                        f"Extending prompt failed: {prompt_output.message}")
+                    logging.info("Falling back to original prompt.")
+                    prompt_list[i] = prompt
+                else:
+                    prompt_list[i] = prompt_output.prompt
         else:
-            input_prompt = [None]
+            prompt_list = [None] * len(prompt_list)
         if dist.is_initialized():
-            dist.broadcast_object_list(input_prompt, src=0)
-        args.prompt = input_prompt[0]
+            dist.broadcast_object_list(prompt_list, src=0)
+
         logging.info(f"Extended prompt: {args.prompt}")
 
     if "t2v" in args.task:
@@ -306,6 +362,7 @@ def generate(args):
         wan_t2v = wan.WanT2V(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
+            lora_dir=args.lora_dir,
             device_id=device,
             rank=rank,
             t5_fsdp=args.t5_fsdp,
@@ -315,22 +372,28 @@ def generate(args):
             convert_model_dtype=args.convert_model_dtype,
         )
 
-        logging.info(f"Generating video ...")
-        video = wan_t2v.generate(
-            args.prompt,
-            size=SIZE_CONFIGS[args.size],
-            frame_num=args.frame_num,
-            shift=args.sample_shift,
-            sample_solver=args.sample_solver,
-            sampling_steps=args.sample_steps,
-            guide_scale=args.sample_guide_scale,
-            seed=args.base_seed,
-            offload_model=args.offload_model)
+        for i, prompt in enumerate(prompt_list):
+            logging.info(f"Generating video ... index:{i} seed:{args.base_seed} prompt:{prompt}")
+            video = wan_t2v.generate(
+                prompt,
+                size=SIZE_CONFIGS[args.size],
+                frame_num=args.frame_num,
+                shift=args.sample_shift,
+                sample_solver=args.sample_solver,
+                sampling_steps=args.sample_steps,
+                guide_scale=args.sample_guide_scale,
+                seed=args.base_seed,
+                offload_model=args.offload_model)
+            if rank == 0:
+                save_video_to_file(video=video, save_dir=args.save_dir, test_idx=i, seed=args.base_seed, prompt=prompt, task=args.task, fps=cfg.sample_fps)
+            del video
+
     elif "ti2v" in args.task:
         logging.info("Creating WanTI2V pipeline.")
         wan_ti2v = wan.WanTI2V(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
+            lora_dir=args.lora_dir,
             device_id=device,
             rank=rank,
             t5_fsdp=args.t5_fsdp,
@@ -340,24 +403,30 @@ def generate(args):
             convert_model_dtype=args.convert_model_dtype,
         )
 
-        logging.info(f"Generating video ...")
-        video = wan_ti2v.generate(
-            args.prompt,
-            img=img,
-            size=SIZE_CONFIGS[args.size],
-            max_area=MAX_AREA_CONFIGS[args.size],
-            frame_num=args.frame_num,
-            shift=args.sample_shift,
-            sample_solver=args.sample_solver,
-            sampling_steps=args.sample_steps,
-            guide_scale=args.sample_guide_scale,
-            seed=args.base_seed,
-            offload_model=args.offload_model)
+        for i, (prompt, img) in enumerate(zip(prompt_list, image_list)):
+            logging.info(f"Generating video ... index:{i} seed:{args.base_seed} prompt:{prompt}")
+            video = wan_ti2v.generate(
+                prompt,
+                img=img,
+                size=SIZE_CONFIGS[args.size],
+                max_area=MAX_AREA_CONFIGS[args.size],
+                frame_num=args.frame_num,
+                shift=args.sample_shift,
+                sample_solver=args.sample_solver,
+                sampling_steps=args.sample_steps,
+                guide_scale=args.sample_guide_scale,
+                seed=args.base_seed,
+                offload_model=args.offload_model)
+            if rank == 0:
+                save_video_to_file(video=video, save_dir=args.save_dir, test_idx=i, seed=args.base_seed, prompt=prompt, task=args.task, fps=cfg.sample_fps)
+            del video
+
     else:
         logging.info("Creating WanI2V pipeline.")
         wan_i2v = wan.WanI2V(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
+            lora_dir=args.lora_dir,
             device_id=device,
             rank=rank,
             t5_fsdp=args.t5_fsdp,
@@ -367,36 +436,22 @@ def generate(args):
             convert_model_dtype=args.convert_model_dtype,
         )
 
-        logging.info("Generating video ...")
-        video = wan_i2v.generate(
-            args.prompt,
-            img,
-            max_area=MAX_AREA_CONFIGS[args.size],
-            frame_num=args.frame_num,
-            shift=args.sample_shift,
-            sample_solver=args.sample_solver,
-            sampling_steps=args.sample_steps,
-            guide_scale=args.sample_guide_scale,
-            seed=args.base_seed,
-            offload_model=args.offload_model)
-
-    if rank == 0:
-        if args.save_file is None:
-            formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            formatted_prompt = args.prompt.replace(" ", "_").replace("/",
-                                                                     "_")[:50]
-            suffix = '.mp4'
-            args.save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.ulysses_size}_{formatted_prompt}_{formatted_time}" + suffix
-
-        logging.info(f"Saving generated video to {args.save_file}")
-        save_video(
-            tensor=video[None],
-            save_file=args.save_file,
-            fps=cfg.sample_fps,
-            nrow=1,
-            normalize=True,
-            value_range=(-1, 1))
-    del video
+        for i, (prompt, img) in enumerate(zip(prompt_list, image_list)):
+            logging.info(f"Generating video ... index:{i} seed:{args.base_seed} prompt:{prompt}")
+            video = wan_i2v.generate(
+                prompt,
+                img,
+                max_area=MAX_AREA_CONFIGS[args.size],
+                frame_num=args.frame_num,
+                shift=args.sample_shift,
+                sample_solver=args.sample_solver,
+                sampling_steps=args.sample_steps,
+                guide_scale=args.sample_guide_scale,
+                seed=args.base_seed,
+                offload_model=args.offload_model)
+            if rank == 0:
+                save_video_to_file(video=video, save_dir=args.save_dir, test_idx=i, seed=args.base_seed, prompt=prompt, task=args.task, fps=cfg.sample_fps)
+            del video
 
     torch.cuda.synchronize()
     if dist.is_initialized():

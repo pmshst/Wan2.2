@@ -406,6 +406,17 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # initialize weights
         self.init_weights()
+        self._keep_in_fp32_modules = [
+            'time_embedding', 'time_projection', 'head', 'norm3', 'norm_q',
+            'norm_k', 'img_emb.proj.0', 'img_emb.proj.4'
+        ]
+        self._keep_in_fp32_params = self._find_fp32_params(['modulation'])
+
+    def _find_fp32_params(self, keywords):
+        return [
+            name for name, _ in self.named_parameters()
+            if any(keyword in name for keyword in keywords)
+        ]
 
     def forward(
         self,
