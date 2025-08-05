@@ -38,7 +38,7 @@ EXAMPLE_PROMPT = {
 }
 
 
-def _validate_args(args):
+def _validate_args(args: argparse.Namespace):
     # Basic check
     if args.ckpt_dir is None:
         raise ValueError("Please specify the checkpoint directory.")
@@ -79,7 +79,7 @@ def _validate_args(args):
         )"
 
 
-def _parse_args():
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate a image or video from a text prompt or image using Wan"
     )
