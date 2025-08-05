@@ -40,9 +40,12 @@ EXAMPLE_PROMPT = {
 
 def _validate_args(args):
     # Basic check
-    assert args.ckpt_dir is not None, "Please specify the checkpoint directory."
-    assert args.task in WAN_CONFIGS, f"Unsupport task: {args.task}"
-    assert args.task in EXAMPLE_PROMPT, f"Unsupport task: {args.task}"
+    if args.ckpt_dir is None:
+        raise ValueError("Please specify the checkpoint directory.")
+    if args.task not in WAN_CONFIGS:
+        raise ValueError(f"Unsupport task: {args.task}")
+    if args.task not in EXAMPLE_PROMPT:
+        raise ValueError(f"Unsupport task: {args.task}")
 
     if args.prompt is None:
         args.prompt = EXAMPLE_PROMPT[args.task]["prompt"]
@@ -50,7 +53,8 @@ def _validate_args(args):
         args.image = EXAMPLE_PROMPT[args.task]["image"]
 
     if args.task == "i2v-A14B":
-        assert args.image is not None, "Please specify the image path for i2v."
+        if args.image is None:
+            raise ValueError("Please specify the image path for i2v.")
 
     cfg = WAN_CONFIGS[args.task]
 
@@ -69,9 +73,10 @@ def _validate_args(args):
     args.base_seed = args.base_seed if args.base_seed >= 0 else random.randint(
         0, sys.maxsize)
     # Size check
-    assert args.size in SUPPORTED_SIZES[
-        args.
-        task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
+    if args.size not in SUPPORTED_SIZES[args.task]:
+        raise ValueError(
+            f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
+        )"
 
 
 def _parse_args():
