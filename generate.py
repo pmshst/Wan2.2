@@ -20,6 +20,8 @@ from wan.distributed.util import init_distributed_group
 from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
 from wan.utils.utils import save_video, str2bool
 
+logger = logging.getLogger(__name__)
+
 EXAMPLE_PROMPT = {
     "t2v-A14B": {
         "prompt":
@@ -38,11 +40,14 @@ EXAMPLE_PROMPT = {
 }
 
 
-def _validate_args(args):
+def _validate_args(args: argparse.Namespace):
     # Basic check
-    assert args.ckpt_dir is not None, "Please specify the checkpoint directory."
-    assert args.task in WAN_CONFIGS, f"Unsupport task: {args.task}"
-    assert args.task in EXAMPLE_PROMPT, f"Unsupport task: {args.task}"
+    if args.ckpt_dir is None:
+        raise ValueError("Please specify the checkpoint directory.")
+    if args.task not in WAN_CONFIGS:
+        raise ValueError(f"Unsupport task: {args.task}")
+    if args.task not in EXAMPLE_PROMPT:
+        raise ValueError(f"Unsupport task: {args.task}")
 
     if args.prompt is None:
         args.prompt = EXAMPLE_PROMPT[args.task]["prompt"]
@@ -50,7 +55,8 @@ def _validate_args(args):
         args.image = EXAMPLE_PROMPT[args.task]["image"]
 
     if args.task == "i2v-A14B":
-        assert args.image is not None, "Please specify the image path for i2v."
+        if args.image is None:
+            raise ValueError("Please specify the image path for i2v.")
 
     cfg = WAN_CONFIGS[args.task]
 
@@ -69,12 +75,13 @@ def _validate_args(args):
     args.base_seed = args.base_seed if args.base_seed >= 0 else random.randint(
         0, sys.maxsize)
     # Size check
-    assert args.size in SUPPORTED_SIZES[
-        args.
-        task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
+    if args.size not in SUPPORTED_SIZES[args.task]:
+        raise ValueError(
+            f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
+        )"
 
 
-def _parse_args():
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate a image or video from a text prompt or image using Wan"
     )
@@ -201,16 +208,16 @@ def _parse_args():
     return args
 
 
-def _init_logging(rank):
-    # logging
+def _init_logging(rank: int):
+    logger = logging.getLogger(__name__)
     if rank == 0:
-        # set format
-        logging.basicConfig(
-            level=logging.INFO,
-            format="[%(asctime)s] %(levelname)s: %(message)s",
-            handlers=[logging.StreamHandler(stream=sys.stdout)])
+        logger.setLevel(logging.INFO)
+        formatter = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s")
+        handler = logging.StreamHandler(stream=sys.stdout)
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
     else:
-        logging.basicConfig(level=logging.ERROR)
+        logger.addHandler(logging.NullHandler())
 
 
 def generate(args):
@@ -222,7 +229,7 @@ def generate(args):
 
     if args.offload_model is None:
         args.offload_model = False if world_size > 1 else True
-        logging.info(
+        logger.info(
             f"offload_model is not specified, set to {args.offload_model}.")
     if world_size > 1:
         torch.cuda.set_device(local_rank)
@@ -232,15 +239,14 @@ def generate(args):
             rank=rank,
             world_size=world_size)
     else:
-        assert not (
-            args.t5_fsdp or args.dit_fsdp
-        ), f"t5_fsdp and dit_fsdp are not supported in non-distributed environments."
-        assert not (
-            args.ulysses_size > 1
-        ), f"sequence parallel are not supported in non-distributed environments."
+        if args.t5_fsdp or args.dit_fsdp:
+            raise RuntimeError("t5_fsdp and dit_fsdp are not supported in non-distributed environments.")
+        if args.ulysses_size > 1:
+            raise RuntimeError("sequence parallel are not supported in non-distributed environments.")
 
     if args.ulysses_size > 1:
-        assert args.ulysses_size == world_size, f"The number of ulysses_size should be equal to the world size."
+        if args.ulysses_size != world_size:
+            raise RuntimeError(f"The number of ulysses_size should be equal to the world size.")
         init_distributed_group()
 
     if args.use_prompt_extend:
@@ -261,25 +267,26 @@ def generate(args):
 
     cfg = WAN_CONFIGS[args.task]
     if args.ulysses_size > 1:
-        assert cfg.num_heads % args.ulysses_size == 0, f"`{cfg.num_heads=}` cannot be divided evenly by `{args.ulysses_size=}`."
+        if cfg.num_heads % args.ulysses_size != 0:
+            raise RuntimeError(f"`{cfg.num_heads=}` cannot be divided evenly by `{args.ulysses_size=}`.")
 
-    logging.info(f"Generation job args: {args}")
-    logging.info(f"Generation model config: {cfg}")
+    logger.info(f"Generation job args: {args}")
+    logger.info(f"Generation model config: {cfg}")
 
     if dist.is_initialized():
         base_seed = [args.base_seed] if rank == 0 else [None]
         dist.broadcast_object_list(base_seed, src=0)
         args.base_seed = base_seed[0]
 
-    logging.info(f"Input prompt: {args.prompt}")
+    logger.info(f"Input prompt: {args.prompt}")
     img = None
     if args.image is not None:
         img = Image.open(args.image).convert("RGB")
-        logging.info(f"Input image: {args.image}")
+        logger.info(f"Input image: {args.image}")
 
     # prompt extend
     if args.use_prompt_extend:
-        logging.info("Extending prompt ...")
+        logger.info("Extending prompt ...")
         if rank == 0:
             prompt_output = prompt_expander(
                 args.prompt,
@@ -287,9 +294,9 @@ def generate(args):
                 tar_lang=args.prompt_extend_target_lang,
                 seed=args.base_seed)
             if prompt_output.status == False:
-                logging.info(
+                logger.info(
                     f"Extending prompt failed: {prompt_output.message}")
-                logging.info("Falling back to original prompt.")
+                logger.info("Falling back to original prompt.")
                 input_prompt = args.prompt
             else:
                 input_prompt = prompt_output.prompt
@@ -299,10 +306,10 @@ def generate(args):
         if dist.is_initialized():
             dist.broadcast_object_list(input_prompt, src=0)
         args.prompt = input_prompt[0]
-        logging.info(f"Extended prompt: {args.prompt}")
+        logger.info(f"Extended prompt: {args.prompt}")
 
     if "t2v" in args.task:
-        logging.info("Creating WanT2V pipeline.")
+        logger.info("Creating WanT2V pipeline.")
         wan_t2v = wan.WanT2V(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
@@ -315,7 +322,7 @@ def generate(args):
             convert_model_dtype=args.convert_model_dtype,
         )
 
-        logging.info(f"Generating video ...")
+        logger.info(f"Generating video ...")
         video = wan_t2v.generate(
             args.prompt,
             size=SIZE_CONFIGS[args.size],
@@ -327,7 +334,7 @@ def generate(args):
             seed=args.base_seed,
             offload_model=args.offload_model)
     elif "ti2v" in args.task:
-        logging.info("Creating WanTI2V pipeline.")
+        logger.info("Creating WanTI2V pipeline.")
         wan_ti2v = wan.WanTI2V(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
@@ -340,7 +347,7 @@ def generate(args):
             convert_model_dtype=args.convert_model_dtype,
         )
 
-        logging.info(f"Generating video ...")
+        logger.info(f"Generating video ...")
         video = wan_ti2v.generate(
             args.prompt,
             img=img,
@@ -354,7 +361,7 @@ def generate(args):
             seed=args.base_seed,
             offload_model=args.offload_model)
     else:
-        logging.info("Creating WanI2V pipeline.")
+        logger.info("Creating WanI2V pipeline.")
         wan_i2v = wan.WanI2V(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
@@ -367,7 +374,7 @@ def generate(args):
             convert_model_dtype=args.convert_model_dtype,
         )
 
-        logging.info("Generating video ...")
+        logger.info("Generating video ...")
         video = wan_i2v.generate(
             args.prompt,
             img,
@@ -403,7 +410,7 @@ def generate(args):
         dist.barrier()
         dist.destroy_process_group()
 
-    logging.info("Finished.")
+    logger.info("Finished.")
 
 
 if __name__ == "__main__":
