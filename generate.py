@@ -239,15 +239,14 @@ def generate(args):
             rank=rank,
             world_size=world_size)
     else:
-        assert not (
-            args.t5_fsdp or args.dit_fsdp
-        ), f"t5_fsdp and dit_fsdp are not supported in non-distributed environments."
-        assert not (
-            args.ulysses_size > 1
-        ), f"sequence parallel are not supported in non-distributed environments."
+        if args.t5_fsdp or args.dit_fsdp:
+            raise RuntimeError("t5_fsdp and dit_fsdp are not supported in non-distributed environments.")
+        if args.ulysses_size > 1:
+            raise RuntimeError("sequence parallel are not supported in non-distributed environments.")
 
     if args.ulysses_size > 1:
-        assert args.ulysses_size == world_size, f"The number of ulysses_size should be equal to the world size."
+        if args.ulysses_size != world_size:
+            raise RuntimeError(f"The number of ulysses_size should be equal to the world size.")
         init_distributed_group()
 
     if args.use_prompt_extend:
@@ -268,7 +267,8 @@ def generate(args):
 
     cfg = WAN_CONFIGS[args.task]
     if args.ulysses_size > 1:
-        assert cfg.num_heads % args.ulysses_size == 0, f"`{cfg.num_heads=}` cannot be divided evenly by `{args.ulysses_size=}`."
+        if cfg.num_heads % args.ulysses_size != 0:
+            raise RuntimeError(f"`{cfg.num_heads=}` cannot be divided evenly by `{args.ulysses_size=}`.")
 
     logger.info(f"Generation job args: {args}")
     logger.info(f"Generation model config: {cfg}")
@@ -410,7 +410,7 @@ def generate(args):
         dist.barrier()
         dist.destroy_process_group()
 
-    logging.info("Finished.")
+    logger.info("Finished.")
 
 
 if __name__ == "__main__":
