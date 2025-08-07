@@ -13,7 +13,47 @@ We are excited to release the distilled version of <a href="https://wan.video"><
 
 
 ## Video Demos
-### Wan2.2-T2V-A14B-NFE4 Demo
+### Wan2.2-I2V-A14B-NFE4-V1 Demo
+
+The videos below can be reproduced using [examples/prompt_list.txt](examples/i2v_prompt_list.txt) and [examples/i2v_image_path_list.txt](examples/i2v_image_path_list.txt).
+
+<table border="0" style="width: 100%; text-align: left; margin-top: 20px;">
+  <tr>
+      <td>
+          <video src="https://github.com/user-attachments/assets/4f6bb1e0-9e2b-4eb2-8b9f-0678ccd5b4ec" width="100%" controls loop></video>
+      </td>
+      <td>
+          <video src="https://github.com/user-attachments/assets/bb249553-3f52-40b3-88f9-6e3bca1a8358" width="100%" controls loop></video>
+      </td>
+       <td>
+          <video src="https://github.com/user-attachments/assets/17a6d26a-dd63-47ef-9a98-1502f503dfba" width="100%" controls loop></video>
+     </td>
+  </tr>
+  <tr>
+      <td>
+          <video src="https://github.com/user-attachments/assets/6ccc69cf-e129-456f-8b93-6dc709cb0ede" width="100%" controls loop></video>
+      </td>
+      <td>
+          <video src="https://github.com/user-attachments/assets/6cf9c586-f37a-47ed-ab5b-e106c3877fa8" width="100%" controls loop></video>
+      </td>
+       <td>
+          <video src="https://github.com/user-attachments/assets/27e82fdf-88af-44ac-b987-b48aa3f9f793" width="100%" controls loop></video>
+     </td>
+  </tr>
+  <tr>
+      <td>
+          <video src="https://github.com/user-attachments/assets/36a76f1d-2b64-4b16-a862-210d0ffd6d55" width="100%" controls loop></video>
+      </td>
+      <td>
+          <video src="https://github.com/user-attachments/assets/4bc36c70-931e-4539-be8c-432d832819d3" width="100%" controls loop></video>
+      </td>
+       <td>
+          <video src="https://github.com/user-attachments/assets/488b9179-741b-4b9d-8f23-895981f054cb" width="100%" controls loop></video>
+     </td>
+  </tr>
+</table>
+
+### Wan2.2-T2V-A14B-NFE4-V1 Demo
 
 The videos below can be reproduced using [examples/prompt_list.txt](examples/prompt_list.txt).
 
@@ -73,7 +113,8 @@ In some results, the direction of the vehicles may be reversed.
 </table>
 
 ## 🔥 Latest News!!
-
+* Aug 07, 2025: 👋 We have open the  [Wan2.2-I2V-A14B-NFE4-V1](https://hf-mirror.com/lightx2v/Wan2.2-Lightning/tree/main/Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1). A workflow compatible with [Kijai's ComfyUI WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) is inside this link. Enjoy!
+* Aug 07, 2025: 👋 We have open the  [Wan2.2-T2V-A14B-NFE4-V1.1](https://hf-mirror.com/lightx2v/Wan2.2-Lightning/tree/main/Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1). A workflow compatible with [Kijai's ComfyUI WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) is inside this link. The generation quality of V1.1 is slightly better than V1. Enjoy!
 * Aug 04, 2025: 👋 We have open the  [Wan2.2-T2V-A14B-NFE4](https://hf-mirror.com/lightx2v/Wan2.2-Lightning). Enjoy!
 - [Kijai's ComfyUI WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) is an implementation of Wan models for ComfyUI. Thanks to its Wan-only focus, it's on the frontline of getting cutting edge optimizations and hot research features.
 
@@ -81,7 +122,7 @@ In some results, the direction of the vehicles may be reversed.
 ## 📑 Todo List
 - [x] Wan2.2-T2V-A14B-4steps
 - [ ] Wan2.2-TI2V-5B-4steps
-- [ ] Wan2.2-I2V-A14B-4steps
+- [x] Wan2.2-I2V-A14B-4steps
 
 ## 🚀 Run Wan2.2-Lightning
 
@@ -158,7 +199,7 @@ DASH_API_KEY=your_key torchrun --nproc_per_node=8 generate.py  --task t2v-A14B -
 torchrun --nproc_per_node=8 generate.py  --task t2v-A14B --size 1280*720 --ckpt_dir ./Wan2.2-T2V-A14B --lora_dir ./Wan2.2-Lightning/Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1 --dit_fsdp --t5_fsdp --ulysses_size 8 --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage" --use_prompt_extend --prompt_extend_method 'local_qwen' --prompt_extend_target_lang 'zh'
 ```
 
-<!-- 
+
 #### Run Image-to-Video Generation
 
 This repository supports the `Wan2.2-I2V-A14B` Image-to-Video model and can simultaneously support video generation at 480P and 720P resolutions.
@@ -166,7 +207,7 @@ This repository supports the `Wan2.2-I2V-A14B` Image-to-Video model and can simu
 
 - Single-GPU inference
 ```sh
-python generate.py --task i2v-A14B --size 1280*720 --ckpt_dir ./Wan2.2-I2V-A14B --offload_model True --convert_model_dtype --image examples/i2v_input.JPG --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside."
+python generate.py  --task i2v-A14B  --size "1280*720" --ckpt_dir ./Wan2.2-I2V-A14B --lora_dir ./Wan2.2-Lightning/Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1 --offload_model True --base_seed 42 --prompt_file examples/i2v_prompt_list.txt --image_path_file examples/i2v_image_path_list.txt
 ```
 
 > This command can run on a GPU with at least 80GB VRAM.
@@ -177,9 +218,10 @@ python generate.py --task i2v-A14B --size 1280*720 --ckpt_dir ./Wan2.2-I2V-A14B 
 - Multi-GPU inference using FSDP + DeepSpeed Ulysses
 
 ```sh
-torchrun --nproc_per_node=8 generate.py --task i2v-A14B --size 1280*720 --ckpt_dir ./Wan2.2-I2V-A14B --image examples/i2v_input.JPG --dit_fsdp --t5_fsdp --ulysses_size 8 --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside."
+torchrun --nproc_per_node=8 generate.py --task i2v-A14B --size 1280*720 --ckpt_dir ./Wan2.2-I2V-A14B --lora_dir ./Wan2.2-Lightning/Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1 --dit_fsdp --t5_fsdp --ulysses_size 8 --base_seed 42 --prompt_file examples/i2v_prompt_list.txt --image_path_file examples/i2v_image_path_list.txt
 ```
 
+<!-- 
 - Image-to-Video Generation without prompt
 
 ```sh
@@ -223,7 +265,8 @@ python generate.py --task ti2v-5B --size 1280*704 --ckpt_dir ./Wan2.2-TI2V-5B --
 torchrun --nproc_per_node=8 generate.py --task ti2v-5B --size 1280*704 --ckpt_dir ./Wan2.2-TI2V-5B --dit_fsdp --t5_fsdp --ulysses_size 8 --image examples/i2v_input.JPG --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside."
 ```
 
-> The process of prompt extension can be referenced [here](#2-using-prompt-extention). -->
+> The process of prompt extension can be referenced [here](#2-using-prompt-extention). 
+-->
 
 
 
