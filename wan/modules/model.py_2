@@ -29,7 +29,6 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
 from .attention import flash_attention
-from typing_extensions import Self
 
 from safetensors import safe_open
 from collections import defaultdict
@@ -760,49 +759,25 @@ class WanModel(ModelMixin, ConfigMixin):
         if part_name.split(".")[0] == "blocks":
             attr_name = "blocks"
 
-        attr_name = part_name.replace(".", "")
-
         if not getattr(self, attr_name):
             part_state_dict = safetensors.torch.load_file(file_path, device="cpu")
             with torch.device("meta"):
                 layer = part_class(*args, **kwargs)
             layer = layer.to_empty(device="cpu")
             layer.load_state_dict(part_state_dict, assign=True)
-            #layer.to('cuda', non_blocking=True)  # 32% faster with non_blocking=True
-
-            if part_name.split(".")[0] == "blocks" and int(part_name.split(".")[1]) > 40 - self.blocks_in_ram:
-                setattr(self, attr_name, layer)
-                DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
-            else:
-                if part_name.split(".")[0] == "blocks":
-                    attr_name = "blocks"
-                #layer.to('cuda', non_blocking=True)
-                setattr(self, attr_name, layer)
-                DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
+            layer.to('cuda', non_blocking=True)  # 32% faster with non_blocking=True
+            setattr(self, attr_name, layer)
         else:
             # v1
             #self.load_all_parts_parallel([file_path], [attr_name])  # same speed as v2
 
             # v2
-            #part_state_dict = safetensors.torch.load_file(file_path, device="cuda")
-            #getattr(self, attr_name).load_state_dict(part_state_dict, assign=True)
+            part_state_dict = safetensors.torch.load_file(file_path, device="cuda")
+            getattr(self, attr_name).load_state_dict(part_state_dict, assign=True)
 
             # v3
             #state_dict = self.cache.load_state_dict(file_path)
             #getattr(self, attr_name).load_state_dict(state_dict, assign=True)
-
-            #v4
-            if part_name.split(".")[0] == "blocks" and int(part_name.split(".")[1]) > 40 - self.blocks_in_ram:
-                pass
-            else:
-                if part_name.split(".")[0] == "blocks":
-                    attr_name = "blocks"
-                part_state_dict = safetensors.torch.load_file(file_path, device="cuda")
-                getattr(self, attr_name).load_state_dict(part_state_dict, assign=True)
-                DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
-
-            # #installed DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
-
         return
 
     def load_all_parts_parallel(self, file_paths, attr_names):
@@ -836,8 +811,7 @@ class WanModel(ModelMixin, ConfigMixin):
                  window_size=(-1, -1),
                  qk_norm=True,
                  cross_attn_norm=True,
-                 eps=1e-6,
-                 blocks_in_ram=0):
+                 eps=1e-6):
         r"""
         Initialize the diffusion model backbone.
 
@@ -877,10 +851,10 @@ class WanModel(ModelMixin, ConfigMixin):
         super().__init__()
 
         if model_type == 't2v_h':
-            self.model_path = "C:/nginx/html/src/Wan2.2/Wan2.2-T2V-A14B/high_noise_model/"
+            self.model_path = "C:/nginx/html/src/Wan2.2/Wan2.2-T2V-A14B/high_noise_model_/"
             model_type = 't2v'
         if model_type == 't2v_l':
-            self.model_path = "C:/nginx/html/src/Wan2.2/Wan2.2-T2V-A14B/low_noise_model/"
+            self.model_path = "C:/nginx/html/src/Wan2.2/Wan2.2-T2V-A14B/low_noise_model_/"
             model_type = 't2v'
 
         assert model_type in ['t2v', 'i2v', 'ti2v', 's2v']
@@ -902,72 +876,31 @@ class WanModel(ModelMixin, ConfigMixin):
         self.eps = eps
 
         # embeddings
-        self.patch_embedding = None
-        #self.patch_embedding = nn.Conv3d(
-        #    in_dim, dim, kernel_size=patch_size, stride=patch_size)
-        self.text_embedding = None
-        #self.text_embedding = nn.Sequential(
-        #    nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
-        #    nn.Linear(dim, dim))
+        #self.patch_embedding = None
+        self.patch_embedding = nn.Conv3d(in_dim, dim, kernel_size=patch_size, stride=patch_size)
 
-        self.time_embedding = None
-        #self.time_embedding = nn.Sequential(
-        #    nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
-        self.time_projection = None
-        #self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
+        #self.text_embedding = None
+        self.text_embedding = nn.Sequential(
+            nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
+            nn.Linear(dim, dim))
+
+        #self.time_embedding = None
+        self.time_embedding = nn.Sequential(
+            nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
+
+        #self.time_projection = None
+        self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
 
         # blocks
-        self.blocks = None
-        self.blocks0 = None
-        self.blocks1 = None
-        self.blocks2 = None
-        self.blocks3 = None
-        self.blocks4 = None
-        self.blocks5 = None
-        self.blocks6 = None
-        self.blocks7 = None
-        self.blocks8 = None
-        self.blocks9 = None
-        self.blocks10 = None
-        self.blocks11 = None
-        self.blocks12 = None
-        self.blocks13 = None
-        self.blocks14 = None
-        self.blocks15 = None
-        self.blocks16 = None
-        self.blocks17 = None
-        self.blocks18 = None
-        self.blocks19 = None
-        self.blocks20 = None
-        self.blocks21 = None
-        self.blocks22 = None
-        self.blocks23 = None
-        self.blocks24 = None
-        self.blocks25 = None
-        self.blocks26 = None
-        self.blocks27 = None
-        self.blocks28 = None
-        self.blocks29 = None
-        self.blocks30 = None
-        self.blocks31 = None
-        self.blocks32 = None
-        self.blocks33 = None
-        self.blocks34 = None
-        self.blocks35 = None
-        self.blocks36 = None
-        self.blocks37 = None
-        self.blocks38 = None
-        self.blocks39 = None
-
-
-        #self.blocks = nn.ModuleList([
-        #    WanAttentionBlock(dim, ffn_dim, num_heads, window_size, qk_norm,
-        #                      cross_attn_norm, eps) for _ in range(num_layers)
-        #])
+        #self.blocks = None
+        self.blocks = nn.ModuleList([
+            WanAttentionBlock(dim, ffn_dim, num_heads, window_size, qk_norm,
+                              cross_attn_norm, eps) for _ in range(num_layers)
+        ])
 
         # head
-        self.head = None
-        #self.head = Head(dim, out_dim, patch_size, eps)
+        #self.head = None
+        self.head = Head(dim, out_dim, patch_size, eps)
 
         # List your SafeTensors files
         #file_paths = [f"./Wan2.2-T2V-A14B/high_noise_model_/blocks.{i}.safetensors" for i in range(40)]
@@ -991,9 +924,6 @@ class WanModel(ModelMixin, ConfigMixin):
             rope_params(1024, 2 * (d // 6))
         ],
                                dim=1)
-
-        self.blocks_in_ram = blocks_in_ram
-        print(f"RAM available for {self.blocks_in_ram}/40 blocks")
 
         # initialize weights
         #self.init_weights()
@@ -1067,10 +997,10 @@ class WanModel(ModelMixin, ConfigMixin):
         e0 = self.time_projection(e).unflatten(2, (6, self.dim))
         print_tensor_size(e0)
 
-        self.time_embedding = None
-        self.time_projection = None
+        #self.time_embedding = None
+        #self.time_projection = None
         # gc.collect()
-        torch.cuda.empty_cache()
+        #torch.cuda.empty_cache()
 
         if not self.text_embedding:
             print("Loading text_embedding to CUDA...")
@@ -1103,21 +1033,17 @@ class WanModel(ModelMixin, ConfigMixin):
             #if i > 9:
             #    continue
 
-            block_name = f"blocks.{i}"
-            print(f"Loading {block_name} to CUDA")
-            self._load_and_move_part(
-                block_name, WanAttentionBlock,
-                dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
-                window_size=self.window_size, qk_norm=self.qk_norm,
-                cross_attn_norm=self.cross_attn_norm, eps=self.eps
-            )
-            if i > 40 - self.blocks_in_ram:
-                block = getattr(self, f"blocks{i}")
-            else:
-                block = getattr(self, "blocks")
+            #block_name = f"blocks.{i}"
+            #print(f"Loading {block_name} to CUDA")
+            #self._load_and_move_part(
+            #    block_name, WanAttentionBlock,
+            #    dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
+            #    window_size=self.window_size, qk_norm=self.qk_norm,
+            #    cross_attn_norm=self.cross_attn_norm, eps=self.eps
+            #)
 
-            x = block(x, **kwargs)
-            x_null = block(x_null, **kwargs_null)
+            x = self.blocks[i](x, **kwargs)
+            x_null = self.blocks[i](x_null, **kwargs_null)
 
             #del blocks
             #delattr(self, block_name)
@@ -1197,15 +1123,12 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # init embeddings
         nn.init.xavier_uniform_(self.patch_embedding.weight.flatten(1))
-        if self.text_embedding:
-            for m in self.text_embedding.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.normal_(m.weight, std=.02)
-        if self.time_embedding:
-            for m in self.time_embedding.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.normal_(m.weight, std=.02)
+        for m in self.text_embedding.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, std=.02)
+        for m in self.time_embedding.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, std=.02)
 
         # init output layer
-        if self.head:
-            nn.init.zeros_(self.head.head.weight)
+        nn.init.zeros_(self.head.head.weight)
