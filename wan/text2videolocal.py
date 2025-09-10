@@ -70,7 +70,7 @@ class DynamicSwapInstaller:
         # clear cache
         gpu_tensor_cache_linear = LRUCache(maxsize=35)
 
-    @staticmethod
+
     def _uninstall_module(module: torch.nn.Module):
         if 'forge_backup_original_class' in module.__dict__:
             module.__class__ = module.__dict__.pop('forge_backup_original_class')
@@ -82,7 +82,7 @@ class DynamicSwapInstaller:
         for m in model.modules():
             count_modules += 1
             DynamicSwapInstaller._install_module(m, **kwargs)
-        print("installed modules" + str(count_modules) + "\n")
+        print("installed modules: " + str(count_modules) + "\n")
         return
 
     @staticmethod
@@ -181,10 +181,10 @@ class WanT2VLocal:
 
         self.vae_stride = config.vae_stride
         self.patch_size = config.patch_size
-        #self.vae = None
-        self.vae = Wan2_1_VAE(
-            vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
-            device="cpu")
+        self.vae = None
+        #self.vae = Wan2_1_VAE(
+        #    vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
+        #    device="cpu")
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.low_noise_model = None
@@ -332,7 +332,7 @@ class WanT2VLocal:
             guide_scale, float) else guide_scale
 
         frame_num = 21
-        sampling_steps = 10
+        sampling_steps = 20
 
         F = frame_num
 
@@ -385,17 +385,15 @@ class WanT2VLocal:
                     tokenizer_path=os.path.join(self.checkpoint_dir, self.config.t5_tokenizer),
                     shard_fn=self.shard_fn if self.t5_fsdp else None)
 
-                if not self.t5_cpu:
-                    self.text_encoder.model.to(self.device)
-                    context = self.text_encoder([input_prompt], self.device)
-                    context_null = self.text_encoder([n_prompt], self.device)
-                    if offload_model:
-                        self.text_encoder.model.cpu()
-                else:
-                    context = self.text_encoder([input_prompt], torch.device('cpu'))
-                    context_null = self.text_encoder([n_prompt], torch.device('cpu'))
-                    context = [t.to(self.device) for t in context]
-                    context_null = [t.to(self.device) for t in context_null]
+
+                DynamicSwapInstaller.install_model(self.text_encoder.model, device="cuda")
+                context = self.text_encoder([input_prompt], torch.device('cuda'))
+                context_null = self.text_encoder([n_prompt], torch.device('cuda'))
+                context = [t.to(self.device) for t in context]
+                context_null = [t.to(self.device) for t in context_null]
+                self.text_encoder = None
+                gc.collect()
+                torch.cuda.empty_cache()
 
                 # Cache the newly computed prompt tensors for reuse
                 torch.save({
@@ -485,21 +483,18 @@ class WanT2VLocal:
                                 #    dit_fsdp=self.dit_fsdp,
                                 #    shard_fn=self.shard_fn,
                                 #    convert_model_dtype=self.convert_model_dtype)
-                                #self.high_noise_model.to('cpu')
+                                #self.high_noise_model.to('cuda')
                                 #self.high_noise_model.eval()
                                 #DynamicSwapInstaller.install_model(self.high_noise_model, device="cuda")
 
                         model = self.high_noise_model
                     else:
                         # low
-                        del self.high_noise_model
-                        gc.collect()
-                        torch.cuda.empty_cache()
-                        self.high_noise_model = None
-                        gc.collect()
-                        torch.cuda.empty_cache()
-
                         if not self.low_noise_model:
+                            self.high_noise_model.clear_mem()
+                            self.high_noise_model = None
+                            gc.collect()
+                            torch.cuda.empty_cache()
                             print(f"Loading low_noise_checkpoint")
                             with autocast(True, dtype=torch.bfloat16):
                                 self.low_noise_model = WanModel.from_pretrained(
@@ -512,7 +507,7 @@ class WanT2VLocal:
                                 #    dit_fsdp=self.dit_fsdp,
                                 #    shard_fn=self.shard_fn,
                                 #    convert_model_dtype=self.convert_model_dtype)
-                                #self.low_noise_model.to('cpu')
+                                #self.low_noise_model.to('cuda')
                                 #self.low_noise_model.eval()
                                 #DynamicSwapInstaller.install_model(self.low_noise_model, device="cuda")
 
@@ -551,15 +546,13 @@ class WanT2VLocal:
                             generator=seed_g)[0]
                         latents = [temp_x0.squeeze(0)]
 
-                x0 = latents
-
-
                 print("Denoising complete. Offloading main models...")
-                del self.high_noise_model
-                del self.low_noise_model
-
+                self.low_noise_model.clear_mem()
+                self.low_noise_model = None
                 gc.collect()
                 torch.cuda.empty_cache()
+
+                x0 = latents
 
                 print(f"Saving final latents to: {latent_file_path}")
                 torch.save(x0, latent_file_path)
@@ -577,13 +570,8 @@ class WanT2VLocal:
                 device=self.device,
                 dtype=torch.bfloat16)
             print("Initializing Lazy State Dict Loader for VAE...")
-            vae_model_path = "./Wan2.2-T2V-A14B/Wan2.1_VAE.pth"
 
-            print("Loading VAE state_dict to CPU RAM...")
-            #self.vae.full_state_dict = torch.load(vae_model_path, map_location="cpu")
-            #with torch.no_grad():
-            #    with autocast(True, dtype=torch.bfloat16):  # or float32 if bfloat16 causes issues with VAE
-            #        videos = self.vae.decode(x0)  # This is the line that was crashing
+            print("Loading VAE")
 
             DynamicSwapInstaller.install_model(self.vae.model, device="cuda")
             videos = self.vae.decode(x0)

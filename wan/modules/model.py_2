@@ -79,7 +79,6 @@ class DynamicSwapInstaller:
         m_id += 1
         module.__dict__['forge_backup_original_class'] = original_class
 
-        @profile
         def hacked_get_attr(self, name: str):
             if '_parameters' in self.__dict__:
                 _parameters = self.__dict__['_parameters']
@@ -109,14 +108,12 @@ class DynamicSwapInstaller:
         # clear cache
         gpu_tensor_cache_linear = LRUCache(maxsize=35)
 
-    @profile
     @staticmethod
     def _uninstall_module(module: torch.nn.Module):
         if 'forge_backup_original_class' in module.__dict__:
             module.__class__ = module.__dict__.pop('forge_backup_original_class')
         return
 
-    @profile
     @staticmethod
     def install_model(model: torch.nn.Module, **kwargs):
         count_modules = 0
