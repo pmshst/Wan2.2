@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from line_profiler import profile
+#from line_profiler import profile
 #from memory_profiler import profile
 
 __all__ = [
@@ -203,7 +203,6 @@ class ResidualBlock(nn.Module):
         self.shortcut = CausalConv3d(in_dim, out_dim, 1) \
             if in_dim != out_dim else nn.Identity()
 
-    @profile
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         h = self.shortcut(x)
         for layer in self.residual:
@@ -242,7 +241,6 @@ class AttentionBlock(nn.Module):
         # zero out the last layer params
         nn.init.zeros_(self.proj.weight)
 
-    @profile
     def forward(self, x):
         identity = x
         b, c, t, h, w = x.size()
@@ -426,7 +424,6 @@ class Decoder3d(nn.Module):
             RMS_norm(out_dim, images=False), nn.SiLU(),
             CausalConv3d(out_dim, 3, 3, padding=1))
 
-    @profile
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         ## conv1
         if feat_cache is not None:
@@ -514,7 +511,6 @@ class WanVAE_(nn.Module):
         self.decoder = Decoder3d(dim, z_dim, dim_mult, num_res_blocks,
                                  attn_scales, self.temperal_upsample, dropout)
 
-    @profile
     def forward(self, x):
         mu, log_var = self.encode(x)
         z = self.reparameterize(mu, log_var)
@@ -549,7 +545,6 @@ class WanVAE_(nn.Module):
         self.clear_cache()
         return mu
 
-    @profile
     def decode(self, z, scale):
         self.clear_cache()
         # z: [b,c,t,h,w]
@@ -621,7 +616,7 @@ def _video_vae(pretrained_path=None, z_dim=None, device='cpu', **kwargs):
 
     return model
 
-@profile
+
 class Wan2_1_VAE:
 
     def __init__(self,

@@ -809,7 +809,6 @@ class WanVAE_(nn.Module):
         self.clear_cache()
         return mu
 
-    @profile
     def decode(self, z, scale):
         self.clear_cache()
         if isinstance(scale[0], torch.Tensor):
