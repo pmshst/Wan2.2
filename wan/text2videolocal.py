@@ -331,8 +331,12 @@ class WanT2VLocal:
         guide_scale = (guide_scale, guide_scale) if isinstance(
             guide_scale, float) else guide_scale
 
-        frame_num = 21
-        sampling_steps = 20
+        # 13 frames 5GB 57.57s/it
+        # 17 frames
+        # 21 frames
+        # 25 frames
+        frame_num = 17
+        sampling_steps = 15
 
         F = frame_num
 
@@ -401,11 +405,6 @@ class WanT2VLocal:
                     'context_null': context_null
                 }, cache_path)
 
-                # Clean up the text encoder to free memory
-                self.text_encoder = None
-                gc.collect()
-                torch.cuda.empty_cache()
-
             print(f"Creating noise")
 
             noise = [
@@ -468,6 +467,7 @@ class WanT2VLocal:
                     if t.item() < boundary:
                         print("low noise model")
 
+                    model = None
                     if t.item() >= boundary:
                         # high
                         if not self.high_noise_model:
@@ -477,14 +477,14 @@ class WanT2VLocal:
                                     self.checkpoint_dir, subfolder=self.config.high_noise_checkpoint,
                                     model_type='t2v_h', blocks_in_ram=blocks_in_ram
                                 )
-                                #self.high_noise_model = self._configure_model(
-                                #    model=self.high_noise_model,
-                                #    use_sp=self.use_sp,
-                                #    dit_fsdp=self.dit_fsdp,
-                                #    shard_fn=self.shard_fn,
-                                #    convert_model_dtype=self.convert_model_dtype)
-                                #self.high_noise_model.to('cuda')
-                                #self.high_noise_model.eval()
+                                self.high_noise_model = self._configure_model(
+                                    model=self.high_noise_model,
+                                    use_sp=self.use_sp,
+                                    dit_fsdp=self.dit_fsdp,
+                                    shard_fn=self.shard_fn,
+                                    convert_model_dtype=self.convert_model_dtype)
+                                self.high_noise_model.to('cuda')
+                                self.high_noise_model.eval()
                                 #DynamicSwapInstaller.install_model(self.high_noise_model, device="cuda")
 
                         model = self.high_noise_model
@@ -492,6 +492,7 @@ class WanT2VLocal:
                         # low
                         if not self.low_noise_model:
                             self.high_noise_model.clear_mem()
+                            del self.high_noise_model, model
                             self.high_noise_model = None
                             gc.collect()
                             torch.cuda.empty_cache()
@@ -501,14 +502,14 @@ class WanT2VLocal:
                                     self.checkpoint_dir, subfolder=self.config.low_noise_checkpoint,
                                     model_type='t2v_l', blocks_in_ram=blocks_in_ram
                                 )
-                                #self.low_noise_model = self._configure_model(
-                                #    model=self.low_noise_model,
-                                #    use_sp=self.use_sp,
-                                #    dit_fsdp=self.dit_fsdp,
-                                #    shard_fn=self.shard_fn,
-                                #    convert_model_dtype=self.convert_model_dtype)
-                                #self.low_noise_model.to('cuda')
-                                #self.low_noise_model.eval()
+                                self.low_noise_model = self._configure_model(
+                                    model=self.low_noise_model,
+                                    use_sp=self.use_sp,
+                                    dit_fsdp=self.dit_fsdp,
+                                    shard_fn=self.shard_fn,
+                                    convert_model_dtype=self.convert_model_dtype)
+                                self.low_noise_model.to('cuda')
+                                self.low_noise_model.eval()
                                 #DynamicSwapInstaller.install_model(self.low_noise_model, device="cuda")
 
                         model = self.low_noise_model
@@ -548,6 +549,7 @@ class WanT2VLocal:
 
                 print("Denoising complete. Offloading main models...")
                 self.low_noise_model.clear_mem()
+                del self.low_noise_model, model
                 self.low_noise_model = None
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -585,4 +587,5 @@ class WanT2VLocal:
 # test prompt
 # kernprof -l -v generate_local.py --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
 # kernprof -l -v generate_local.py --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "A breathtaking high-speed chase through a neon-lit cyberpunk city at night. A sleek, futuristic motorcycle with glowing blue accents weaves through flying vehicles and holographic advertisements. The rider, clad in reflective black gear, leans into sharp turns while evading pursuit. Dynamic camera angles follow from above, below, and alongside, capturing the intense motion blur of city lights. Rain-slicked streets create colorful reflections as the motorcycle jumps between elevated highways. Explosions detonate in the background, illuminating the scene with orange bursts. Slow-motion shots capture water droplets and debris frozen in air before returning to blistering speed. The scene culminates in a daring leap across a massive gap between skyscrapers, with the cityscape sprawling below. Cinematic lighting, dramatic shadows, and particle effects enhance the adrenaline-fueled sequence."
+# kernprof -l -v generate_local.py --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "Cinematic cyberpunk rainforest at twilight - Bioluminescent neon vines wrapping around ancient trees, holographic wildlife flickering between digital raindrops, slow-motion drone shot ascending through misty canopy layers. Style - Hyperrealistic Unreal Engine 5 render, neon-noir color palette, electric cyan deep magenta, volumetric lighting, ethereal synthwave soundtrack."
 

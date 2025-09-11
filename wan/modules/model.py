@@ -16,7 +16,7 @@ from diffusers.models.modeling_utils import ModelMixin
 
 from .attention import flash_attention
 
-from line_profiler import profile
+#from line_profiler import profile
 #from memory_profiler import profile
 
 
@@ -398,32 +398,26 @@ class WanModel(ModelMixin, ConfigMixin):
         file_path = self.model_path + part_name + '.safetensors'
         attr_name = part_name.replace(".", "")
 
-        if not getattr(self, attr_name):
-            part_state_dict = safetensors.torch.load_file(file_path, device="cpu")
-            with torch.device("meta"):
-                layer = part_class(*args, **kwargs)
-            layer = layer.to_empty(device="cpu")
-            layer.load_state_dict(part_state_dict, assign=True)
-            #layer.to('cuda', non_blocking=True)  # 32% faster with non_blocking=True
+        if getattr(self, attr_name):
+            return
 
-            if part_name.split(".")[0] == "blocks" and int(part_name.split(".")[1]) > 40 - self.blocks_in_ram:
-                setattr(self, attr_name, layer)
-                DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
-            else:
-                if part_name.split(".")[0] == "blocks":
-                    attr_name = "blocks"
-                #layer.to('cuda', non_blocking=True)
-                setattr(self, attr_name, layer)
-                DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
+        part_state_dict = safetensors.torch.load_file(file_path, device="cpu")
+        with torch.device("meta"):
+            layer = part_class(*args, **kwargs)
+        layer = layer.to_empty(device="cpu")
+
+        if part_name.split(".")[0] == "blocks" and int(part_name.split(".")[1]) > 40 - self.blocks_in_ram:
+            layer.load_state_dict(part_state_dict, assign=True)
+            setattr(self, attr_name, layer)
+            DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
         else:
-            #v4
-            if part_name.split(".")[0] == "blocks" and int(part_name.split(".")[1]) > 40 - self.blocks_in_ram:
-                pass
+            if part_name.split(".")[0] == "blocks":
+                attr_name = "blocks"
+            if getattr(self, attr_name, layer):
+                getattr(self, attr_name, layer).load_state_dict(part_state_dict, assign=True)
             else:
-                if part_name.split(".")[0] == "blocks":
-                    attr_name = "blocks"
-                part_state_dict = safetensors.torch.load_file(file_path, device="cuda")
-                getattr(self, attr_name).load_state_dict(part_state_dict, assign=True)
+                layer.load_state_dict(part_state_dict, assign=True)
+                setattr(self, attr_name, layer)
                 DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
 
         return
@@ -604,7 +598,6 @@ class WanModel(ModelMixin, ConfigMixin):
         #self.init_weights()
 
     # batch forward
-    @profile
     def forward(
             self,
             x,
@@ -766,8 +759,8 @@ class WanModel(ModelMixin, ConfigMixin):
 
         del grid_sizes
 
-        return [u.float()
-                for u in x], [u.float()
+        return [u
+                for u in x], [u
                 for u in x_null]
 
     def unpatchify(self, x, grid_sizes):
