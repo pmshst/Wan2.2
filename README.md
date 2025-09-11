@@ -22,6 +22,8 @@
 <p>* generated frames are limited to 21-25 to fit in 8GB VRAM</p>
 <p></p>* tested on <b>HELIOS PREDATOR 300</b> aptop (3070Ti 8GB) 83.40s/it for 25 frames,  66.30s/it for 17 frames (6GB)</p>
 
+Wan2.2 on 8GB VRAM: Run Advanced AI Video Generation Locally! (Optimization Guide) https://youtu.be/LlqnghCNxXM
+
 -----
 
 [**Wan: Open and Advanced Large-Scale Video Generative Models**](https://arxiv.org/abs/2503.20314) <be>
