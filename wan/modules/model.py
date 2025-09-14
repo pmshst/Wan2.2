@@ -1,14 +1,13 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 
-# changed to run inference on 8GB VRAM (generated frames limited to 21-25, increase if you have more VRAM)
+# changed to run inference on 8GB VRAM
+# (generated frames limited to 21, increase if you have more VRAM)
 import gc
 import math
-import os
 import torch
 import torch.nn as nn
 import safetensors.torch
 
-from safetensors import safe_open
 from typing import List
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
@@ -50,24 +49,12 @@ class DynamicSwapInstaller:
         return
 
     @staticmethod
-    def _uninstall_module(module: torch.nn.Module):
-        if 'forge_backup_original_class' in module.__dict__:
-            module.__class__ = module.__dict__.pop('forge_backup_original_class')
-        return
-
-    @staticmethod
     def install_model(model: torch.nn.Module, **kwargs):
         count_modules = 0
         for m in model.modules():
             count_modules += 1
             DynamicSwapInstaller._install_module(m, **kwargs)
         print("installed modules " + str(count_modules) + "\n")
-        return
-
-    @staticmethod
-    def uninstall_model(model: torch.nn.Module):
-        for m in model.modules():
-            DynamicSwapInstaller._uninstall_module(m)
         return
 
 
@@ -127,14 +114,12 @@ def rope_apply(x, grid_sizes, freqs):
         seq_len = f * h * w
 
         # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
-            seq_len, n, -1, 2))
+        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(seq_len, n, -1, 2))
         freqs_i = torch.cat([
             freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
             freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
             freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ],
-                            dim=-1).reshape(seq_len, 1, -1)
+        ], dim=-1).reshape(seq_len, 1, -1)
 
         # apply rotary embedding
         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
@@ -406,7 +391,16 @@ class WanModel(ModelMixin, ConfigMixin):
             layer = part_class(*args, **kwargs)
         layer = layer.to_empty(device="cpu")
 
-        if part_name.split(".")[0] == "blocks" and int(part_name.split(".")[1]) > 40 - self.blocks_in_ram:
+        if self.blocks_in_vram > 0 and part_name.split(".")[0] == "blocks" \
+                and int(part_name.split(".")[1]) < self.blocks_in_vram:
+            if getattr(self, attr_name) == None:
+                layer.load_state_dict(part_state_dict, assign=True)
+                layer.to('cuda', non_blocking=True)
+                setattr(self, attr_name, layer)
+            return
+
+        if part_name.split(".")[0] == "blocks" \
+                and int(part_name.split(".")[1]) >= 40 - self.blocks_in_ram:
             layer.load_state_dict(part_state_dict, assign=True)
             setattr(self, attr_name, layer)
             DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
@@ -439,7 +433,8 @@ class WanModel(ModelMixin, ConfigMixin):
                  qk_norm=True,
                  cross_attn_norm=True,
                  eps=1e-6,
-                 blocks_in_ram=0):
+                 blocks_in_ram=0,
+                 blocks_in_vram=0):
         r"""
         Initialize the diffusion model backbone.
 
@@ -480,15 +475,15 @@ class WanModel(ModelMixin, ConfigMixin):
 
         if model_type == 't2v_h':
             model_type = 't2v'
-            # todo replace with your path to converted models see: optimize_files.py
-            self.model_path = "C:/nginx/html/src/Wan2.2/Wan2.2-T2V-A14B/high_noise_model/"
+            # todo: replace with your path to converted models see: optimize_files.py
+            self.model_path = "./Wan2.2-T2V-A14B/high_noise_model/"
             gc.collect()
             torch.cuda.empty_cache()
 
         if model_type == 't2v_l':
             model_type = 't2v'
-            # todo replace with your path to converted models see: optimize_files.py
-            self.model_path = "C:/nginx/html/src/Wan2.2/Wan2.2-T2V-A14B/low_noise_model/"
+            # todo: replace with your path to converted models see: optimize_files.py
+            self.model_path = "./Wan2.2-T2V-A14B/low_noise_model/"
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -512,18 +507,10 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # embeddings
         self.patch_embedding = None
-        #self.patch_embedding = nn.Conv3d(
-        #    in_dim, dim, kernel_size=patch_size, stride=patch_size)
         self.text_embedding = None
-        #self.text_embedding = nn.Sequential(
-        #    nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
-        #    nn.Linear(dim, dim))
 
         self.time_embedding = None
-        #self.time_embedding = nn.Sequential(
-        #    nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
         self.time_projection = None
-        #self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
 
         # blocks
         self.blocks = None
@@ -568,17 +555,7 @@ class WanModel(ModelMixin, ConfigMixin):
         self.blocks38 = None
         self.blocks39 = None
 
-
-        #self.blocks = nn.ModuleList([
-        #    WanAttentionBlock(dim, ffn_dim, num_heads, window_size, qk_norm,
-        #                      cross_attn_norm, eps) for _ in range(num_layers)
-        #])
-
-        # head
         self.head = None
-        #self.head = Head(dim, out_dim, patch_size, eps)
-
-
 
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
@@ -587,15 +564,13 @@ class WanModel(ModelMixin, ConfigMixin):
             rope_params(1024, d - 4 * (d // 6)),
             rope_params(1024, 2 * (d // 6)),
             rope_params(1024, 2 * (d // 6))
-        ],
-                               dim=1)
+        ], dim=1)
 
         self.blocks_in_ram = blocks_in_ram
-        print(f"RAM available for {self.blocks_in_ram}/40 blocks")
+        print(f"\nRAM available for {self.blocks_in_ram}/40 blocks\n")
 
-        self.is_low_mem = True
-        # initialize weights
-        #self.init_weights()
+        self.blocks_in_vram = blocks_in_vram
+        print(f"\nVRAM available for {self.blocks_in_vram}/40 blocks\n")
 
     # batch forward
     def forward(
@@ -630,11 +605,6 @@ class WanModel(ModelMixin, ConfigMixin):
             [torch.cat(
                 [u, u.new_zeros(1, seq_len - u.size(1), u.size(2))], dim=1) for u in x])
 
-        if self.is_low_mem:
-            self.patch_embedding = None
-            # gc.collect()
-            torch.cuda.empty_cache()
-
         if not self.time_embedding:
             print("Loading time_embedding to CUDA...")
             self._load_and_move_part_v1("time_embedding", nn.Sequential,
@@ -647,14 +617,11 @@ class WanModel(ModelMixin, ConfigMixin):
                                      nn.SiLU(),
                                      nn.Linear(self.dim, self.dim * 6))
 
-        print("device")
         t_device = t.to(device)
-        print(device)
-        print(t_device)
         if t_device.dim() == 1:
             t_device = t_device.expand(t_device.size(0), seq_len)
         sin_embed = sinusoidal_embedding_1d(self.freq_dim,
-                                            t_device.flatten()).unflatten(0, (t_device.size(0), seq_len))
+                    t_device.flatten()).unflatten(0, (t_device.size(0), seq_len))
         target_dtype = self.time_embedding[0].weight.dtype
         sin_embed = sin_embed.to(device, dtype=target_dtype)
 
@@ -663,12 +630,6 @@ class WanModel(ModelMixin, ConfigMixin):
         del sin_embed
 
         e0 = self.time_projection(e).unflatten(2, (6, self.dim))
-
-        if self.is_low_mem:
-            self.time_embedding = None
-            self.time_projection = None
-            gc.collect()
-            torch.cuda.empty_cache()
 
         if not self.text_embedding:
             print("Loading text_embedding to CUDA...")
@@ -679,20 +640,24 @@ class WanModel(ModelMixin, ConfigMixin):
 
         context = self.text_embedding(
             torch.stack(
-                [torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in context]).to(device)
+                [torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
+                 for u in context]).to(device)
         )
-        context_null = self.text_embedding(
-            torch.stack(
-                [torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in context_null]).to(device)
-        )
-        if self.is_low_mem:
-            self.text_embedding = None
-            gc.collect()
-            torch.cuda.empty_cache()
+        if context_null != None:
+            context_null = self.text_embedding(
+                torch.stack(
+                    [torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
+                     for u in context_null]).to(device)
+            )
 
         # --- Part 2: Main Blocks Loop ---
-        kwargs = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes, freqs=self.freqs.to(device), context=context, context_lens=None)
-        kwargs_null = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes, freqs=self.freqs.to(device), context=context_null, context_lens=None)
+        kwargs = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes,
+                      freqs=self.freqs.to(device), context=context, context_lens=None)
+        if context_null != None:
+            kwargs_null = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes,
+                               freqs=self.freqs.to(device), context=context_null, context_lens=None)
+        else:
+            kwargs_null = None
 
         del seq_lens, context, context_null, e0
         torch.cuda.empty_cache()
@@ -700,18 +665,20 @@ class WanModel(ModelMixin, ConfigMixin):
         x_null = x.clone()
         for i in range(self.num_layers):
             block_name = f"blocks.{i}"
-            print(f"Loading {block_name} to CUDA")
-
-            if i > 40 - self.blocks_in_ram:
+            if i < self.blocks_in_vram or i >= 40 - self.blocks_in_ram:
+                if i < self.blocks_in_vram:
+                    print(f"Loading {block_name} VRAM")
+                else:
+                    print(f"Loading {block_name} RAM")
                 self._load_and_move_part_v1(
                     block_name, WanAttentionBlock,
                     dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
                     window_size=self.window_size, qk_norm=self.qk_norm,
                     cross_attn_norm=self.cross_attn_norm, eps=self.eps
                 )
-                #block = getattr(self, f"blocks1")
                 block = getattr(self, f"blocks{i}")
             else:
+                print(f"Loading {block_name} DISC")
                 self._load_and_move_part_v1(
                     block_name, WanAttentionBlock,
                     dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
@@ -721,13 +688,10 @@ class WanModel(ModelMixin, ConfigMixin):
                 block = getattr(self, "blocks")
 
             x = block(x, **kwargs)
-            x_null = block(x_null, **kwargs_null)
-
-        if self.is_low_mem:
-            self.blocks = None
-            #delattr(self, block_name)
-            gc.collect()
-            torch.cuda.empty_cache()
+            if kwargs_null:
+                x_null = block(x_null, **kwargs_null)
+            else:
+                x_null = None
 
         # --- Part 3: Head and Unpatchify ---
 
@@ -743,19 +707,17 @@ class WanModel(ModelMixin, ConfigMixin):
         x = self.head(
             x.to(device),
             e)
-        x_null = self.head(
-            x_null.to(device),
-            e)
+        if kwargs_null:
+            x_null = self.head(x_null.to(device), e)
 
         del e
-        if self.is_low_mem:
-            self.head = None
-            gc.collect()
-            torch.cuda.empty_cache()
 
         print("Performing unpatchify...")
         x = self.unpatchify(x, grid_sizes)
-        x_null = self.unpatchify(x_null, grid_sizes)
+        if kwargs_null:
+            x_null = self.unpatchify(x_null, grid_sizes)
+        else:
+            x_null = []
 
         del grid_sizes
 
@@ -787,30 +749,3 @@ class WanModel(ModelMixin, ConfigMixin):
             u = u.reshape(c, *[i * j for i, j in zip(v, self.patch_size)])
             out.append(u)
         return out
-
-    def init_weights(self):
-        r"""
-        Initialize model parameters using Xavier initialization.
-        """
-
-        # basic init
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-        # init embeddings
-        nn.init.xavier_uniform_(self.patch_embedding.weight.flatten(1))
-        if self.text_embedding:
-            for m in self.text_embedding.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.normal_(m.weight, std=.02)
-        if self.time_embedding:
-            for m in self.time_embedding.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.normal_(m.weight, std=.02)
-
-        # init output layer
-        if self.head:
-            nn.init.zeros_(self.head.head.weight)
