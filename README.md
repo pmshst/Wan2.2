@@ -19,8 +19,8 @@
 <li> python <strong>generate_local.py</strong> --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."</li>
 </ol>
 
-<p>* generated frames are limited to 21-25 to fit in 8GB VRAM</p>
-<p></p>* tested on <b>HELIOS PREDATOR 300</b> aptop (3070Ti 8GB) 83.40s/it for 25 frames,  66.30s/it for 17 frames (6GB)</p>
+<p>* generated frames are limited to 21 (1.3 sec) to fit in 8GB VRAM</p>
+<p></p>* tested on <b>HELIOS PREDATOR 300</b> aptop (3070Ti 8GB) 79.50s for 21 frames,  65.80s/it for 17 frames, 13 frames 50.02s/it </p>
 
 Wan2.2 on 8GB VRAM: Run Advanced AI Video Generation Locally! (Optimization Guide) https://youtu.be/LlqnghCNxXM
 
