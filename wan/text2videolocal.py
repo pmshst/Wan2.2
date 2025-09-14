@@ -1,5 +1,4 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
-import gc
 import logging
 import math
 import os
@@ -14,14 +13,13 @@ import gc
 from torch.cuda.amp import autocast
 
 import torch
-import torch.cuda.amp as amp
 import torch.distributed as dist
 from tqdm import tqdm
 
 from .distributed.fsdp import shard_model
 from .distributed.sequence_parallel import sp_attn_forward, sp_dit_forward
 from .distributed.util import get_world_size
-from .modules.model import WanModel, DynamicSwapInstaller
+from .modules.model import WanModel
 from .modules.t5 import T5EncoderModel
 from .modules.vae2_1 import Wan2_1_VAE
 from .utils.fm_solvers import (
@@ -63,13 +61,6 @@ class DynamicSwapInstaller:
         })
 
         return
-
-    @staticmethod
-    def print_stats():
-        global gpu_tensor_cache_linear
-        # clear cache
-        gpu_tensor_cache_linear = LRUCache(maxsize=35)
-
 
     def _uninstall_module(module: torch.nn.Module):
         if 'forge_backup_original_class' in module.__dict__:
@@ -239,10 +230,8 @@ class WanT2VLocal:
             model = shard_fn(model)
         else:
             if convert_model_dtype:
-                print(f"convetr to {self.param_dtype}")
                 model.to(self.param_dtype)
             if not self.init_on_cpu:
-                print(f"load to {self.device}")
                 model.to(self.device)
 
         return model
@@ -331,12 +320,21 @@ class WanT2VLocal:
         guide_scale = (guide_scale, guide_scale) if isinstance(
             guide_scale, float) else guide_scale
 
-        # 13 frames 5GB 57.57s/it
-        # 17 frames
-        # 21 frames
-        # 25 frames
-        frame_num = 17
-        sampling_steps = 15
+        # 13 frames 5.5Gb 52.13s/it 4.01s/it/frame    (50.02s/it +3 blocks on vram 7.3Gb)
+        # 17 frames 6.6Gb 65.80s/it 3.87s/it/frame
+        # 21 frames 7.7Gb 79.50s/it 3.78s/it/frame
+        frame_num = 21
+        sampling_steps = 16
+
+        # size 720*576
+        # 49 frames 7.2Gb 80.12s/it 1.63s/it/frame
+        # size = (720, 576)
+
+        # size 1600*896
+        # 13 frames 7.5Gb 85.47s/it 6.57s/it/frame
+        # size = (1600, 896)
+
+        self.without_neg_prompt = False  # 2x faster, poor quality
 
         F = frame_num
 
@@ -455,27 +453,41 @@ class WanT2VLocal:
                 # sample videos
                 latents = noise
 
-                arg_c = {'context': context, 'seq_len': seq_len}
-                arg_null = {'context': context_null, 'seq_len': seq_len}
-                blocks_in_ram = int(get_free_ram() / 830000000)
+                block_mem = 780000000
+                blocks_in_ram = int(get_free_ram() / block_mem)
+
+                free_memory, total_memory = torch.cuda.mem_get_info()
+                blocks_in_vram = 0
+                if size == (1280, 720):
+                    mem_need = frame_num / 4 * 1.05 + 2.2
+                    blocks_in_vram = int(((total_memory - mem_need * 1024 * 1024 * 1024)) / block_mem)
+                torch.backends.cudnn.benchmark = True
+
+                if blocks_in_ram > 40 - blocks_in_vram:
+                    blocks_in_ram = 40 - blocks_in_vram
+
+                if self.without_neg_prompt:
+                    context_null = None
+
+                it = 1
                 for _, t in enumerate(tqdm(timesteps)):
+                    print(f"\nTimestep: {t}")
                     latent_model_input = latents
                     timestep = [t]
 
                     timestep = torch.stack(timestep)
 
-                    if t.item() < boundary:
-                        print("low noise model")
-
                     model = None
                     if t.item() >= boundary:
                         # high
                         if not self.high_noise_model:
-                            print(f"Loading high_noise_checkpoint")
+                            print(f"\nLoading high_noise_checkpoint")
                             with autocast(True, dtype=torch.bfloat16):
                                 self.high_noise_model = WanModel.from_pretrained(
-                                    self.checkpoint_dir, subfolder=self.config.high_noise_checkpoint,
-                                    model_type='t2v_h', blocks_in_ram=blocks_in_ram
+                                    self.checkpoint_dir,
+                                    subfolder=self.config.high_noise_checkpoint,
+                                    model_type='t2v_h', blocks_in_ram=blocks_in_ram,
+                                    blocks_in_vram=blocks_in_vram
                                 )
                                 self.high_noise_model = self._configure_model(
                                     model=self.high_noise_model,
@@ -484,8 +496,7 @@ class WanT2VLocal:
                                     shard_fn=self.shard_fn,
                                     convert_model_dtype=self.convert_model_dtype)
                                 self.high_noise_model.to('cuda')
-                                self.high_noise_model.eval()
-                                #DynamicSwapInstaller.install_model(self.high_noise_model, device="cuda")
+                                self.high_noise_model.eval().requires_grad_(False)
 
                         model = self.high_noise_model
                     else:
@@ -496,11 +507,13 @@ class WanT2VLocal:
                             self.high_noise_model = None
                             gc.collect()
                             torch.cuda.empty_cache()
-                            print(f"Loading low_noise_checkpoint")
+                            print(f"\nLoading low_noise_checkpoint")
                             with autocast(True, dtype=torch.bfloat16):
                                 self.low_noise_model = WanModel.from_pretrained(
-                                    self.checkpoint_dir, subfolder=self.config.low_noise_checkpoint,
-                                    model_type='t2v_l', blocks_in_ram=blocks_in_ram
+                                    self.checkpoint_dir,
+                                    subfolder=self.config.low_noise_checkpoint,
+                                    model_type='t2v_l', blocks_in_ram=blocks_in_ram,
+                                    blocks_in_vram=blocks_in_vram
                                 )
                                 self.low_noise_model = self._configure_model(
                                     model=self.low_noise_model,
@@ -509,43 +522,33 @@ class WanT2VLocal:
                                     shard_fn=self.shard_fn,
                                     convert_model_dtype=self.convert_model_dtype)
                                 self.low_noise_model.to('cuda')
-                                self.low_noise_model.eval()
-                                #DynamicSwapInstaller.install_model(self.low_noise_model, device="cuda")
+                                self.low_noise_model.eval().requires_grad_(False)
 
                         model = self.low_noise_model
-
-                    sample_guide_scale = guide_scale[1] if t.item(
-                    ) >= boundary else guide_scale[0]
-
-                    batche_proc = True
-                    if batche_proc:
-                        noise_pred_cond, noise_pred_uncond = model(
-                            x=latent_model_input,
-                            t=timestep,
-                            context=context,
-                            context_null=context_null,
-                            seq_len=seq_len
-                        )
-
-                        # 4. Apply guidance
-                        noise_pred = noise_pred_uncond[0] + sample_guide_scale * (noise_pred_cond[0] - noise_pred_uncond[0])
-
+                    it += 1
+                    noise_pred_cond, noise_pred_uncond = model(
+                        x=latent_model_input,
+                        t=timestep,
+                        context=context,
+                        context_null=context_null,
+                        seq_len=seq_len
+                    )
+                    if self.without_neg_prompt:
+                        noise_pred = noise_pred_cond[0]
                     else:
-                        noise_pred_cond = model(
-                            latent_model_input, t=timestep, **arg_c)[0]
-                        noise_pred_uncond = model(
-                            latent_model_input, t=timestep, **arg_null)[0]
+                        sample_guide_scale = guide_scale[1] \
+                            if t.item() >= boundary else guide_scale[0]
+                        noise_pred = noise_pred_uncond[0] + sample_guide_scale \
+                                     * (noise_pred_cond[0] - noise_pred_uncond[0])
 
-                        noise_pred = noise_pred_uncond + sample_guide_scale * (noise_pred_cond - noise_pred_uncond)
 
-                    if noise_pred_cond:
-                        temp_x0 = sample_scheduler.step(
-                            noise_pred.unsqueeze(0),
-                            t,
-                            latents[0].unsqueeze(0),
-                            return_dict=False,
-                            generator=seed_g)[0]
-                        latents = [temp_x0.squeeze(0)]
+                    temp_x0 = sample_scheduler.step(
+                        noise_pred.unsqueeze(0),
+                        t,
+                        latents[0].unsqueeze(0),
+                        return_dict=False,
+                        generator=seed_g)[0]
+                    latents = [temp_x0.squeeze(0)]
 
                 print("Denoising complete. Offloading main models...")
                 self.low_noise_model.clear_mem()
@@ -588,4 +591,6 @@ class WanT2VLocal:
 # kernprof -l -v generate_local.py --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
 # kernprof -l -v generate_local.py --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "A breathtaking high-speed chase through a neon-lit cyberpunk city at night. A sleek, futuristic motorcycle with glowing blue accents weaves through flying vehicles and holographic advertisements. The rider, clad in reflective black gear, leans into sharp turns while evading pursuit. Dynamic camera angles follow from above, below, and alongside, capturing the intense motion blur of city lights. Rain-slicked streets create colorful reflections as the motorcycle jumps between elevated highways. Explosions detonate in the background, illuminating the scene with orange bursts. Slow-motion shots capture water droplets and debris frozen in air before returning to blistering speed. The scene culminates in a daring leap across a massive gap between skyscrapers, with the cityscape sprawling below. Cinematic lighting, dramatic shadows, and particle effects enhance the adrenaline-fueled sequence."
 # kernprof -l -v generate_local.py --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "Cinematic cyberpunk rainforest at twilight - Bioluminescent neon vines wrapping around ancient trees, holographic wildlife flickering between digital raindrops, slow-motion drone shot ascending through misty canopy layers. Style - Hyperrealistic Unreal Engine 5 render, neon-noir color palette, electric cyan deep magenta, volumetric lighting, ethereal synthwave soundtrack."
+# kernprof -l -v generate_local.py --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "Telephoto lens. A tiger walking through the jungle. The camera follows the tiger smoothly, keeping it in the center of the frame as the muscles ripple slowly beneath its striped fur. The tiger's eyes are focused intently ahead, and its steps are steady and powerful. The background is dense green vegetation and trees, with sunlight filtering through the leaves to cast mottled light and shadows."
+
 
