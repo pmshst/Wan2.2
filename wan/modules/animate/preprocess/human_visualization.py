@@ -1,3 +1,4 @@
+# Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import os
 import cv2
 import time
@@ -190,7 +191,7 @@ def draw_ellipse_by_2kp(img, keypoint1, keypoint2, color, threshold=0.6):
 
 
 def split_pose2d_kps_to_aa(kp2ds: np.ndarray) -> List[np.ndarray]:
-    """将pose2d输出的133关键点转化为aa需要的身体、左右手关键点
+    """Convert the 133 keypoints from pose2d to body and hands keypoints.
 
     Args:
         kp2ds (np.ndarray): [133, 2]

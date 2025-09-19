@@ -1,5 +1,5 @@
 # Copyright (c) 2025. Your modifications here.
-# 该文件用于自定义和扩展 sam2_video_predictor.py 的内容，避免直接修改原始代码。
+# A wrapper for sam2 functions
 from collections import OrderedDict
 import torch
 from tqdm import tqdm
@@ -13,7 +13,7 @@ from sam_utils import load_video_frames_v2, load_video_frames
 
 class SAM2VideoPredictor(_SAM2VideoPredictor):
     def __init__(self, *args, **kwargs):
-        # 可在此处添加自定义初始化逻辑
+
         super().__init__(*args, **kwargs)
         
     @torch.inference_mode()

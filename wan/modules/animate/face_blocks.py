@@ -1,3 +1,4 @@
+# Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 from torch import nn
 import torch
 from typing import Tuple, Optional

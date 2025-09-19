@@ -1,3 +1,4 @@
+# Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import os
 import cv2
 import numpy as np
@@ -342,8 +343,6 @@ def rescale_skeleton(H, W, keypoints, bone_ratio_list):
         angle_list.append(angle)
 
     # # second traverse, calculate new keypoints
-    # rescale_keypoints = keypoints.copy()
-
     for idx, (k1_index, k2_index) in enumerate(limbSeq):
         # update dst_keypoints
         start_keypoint = rescale_keypoints[k1_index - 1]
@@ -636,6 +635,7 @@ def retarget_pose(src_skeleton, dst_skeleton, all_src_skeleton, src_skeleton_edi
             scale_min_edit = np.sqrt(src_skeleton_edit['height'] * src_skeleton_edit['width']) / np.sqrt(dst_skeleton_edit['height'] * dst_skeleton_edit['width'])
             scale_ratio_flag = True
         
+        # Flux may change the scale, compensate for it here
         ratio_src = calculate_scale_ratio(src_skeleton, src_skeleton_edit, scale_ratio_flag)
         ratio_dst = calculate_scale_ratio(dst_skeleton, dst_skeleton_edit, scale_ratio_flag)
 
@@ -705,8 +705,8 @@ def retarget_pose(src_skeleton, dst_skeleton, all_src_skeleton, src_skeleton_edi
     
     for idx, ratio in enumerate(ratio_list):
         if ratio == -1:
-            if ratio_list[2] != -1 and ratio_list[5] != -1:
-                ratio_list[idx] = (ratio_list[2] + ratio_list[5]) / 2
+            if ratio_list[0] != -1 and ratio_list[1] != -1:
+                ratio_list[idx] = (ratio_list[0] + ratio_list[1]) / 2
 
     # Consider adding constraints when Flux fails to correct head pose, causing neck issues.
     # if ratio_list[12] > (ratio_list[0]+ratio_list[1])/2*1.25:

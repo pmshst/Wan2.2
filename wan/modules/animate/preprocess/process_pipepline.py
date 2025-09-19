@@ -1,3 +1,4 @@
+# Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import os
 import numpy as np
 import shutil
@@ -36,7 +37,7 @@ class ProcessPipeline():
 
     def __call__(self, video_path, refer_image_path, output_path, resolution_area=[1280, 720], fps=30, iterations=3, k=7, w_len=1, h_len=1, retarget_flag=False, use_flux=False, replace_flag=False):
         if replace_flag:
-            # 读取视频
+
             video_reader = VideoReader(video_path)
             frame_num = len(video_reader)
             print('frame_num: {}'.format(frame_num))
@@ -65,7 +66,7 @@ class ProcessPipeline():
             height, width = frames[0].shape[:2]
             logger.info(f"Processing pose meta")
 
-            # 获取tpl和refer的pose_meta
+
             tpl_pose_metas = self.pose2d(frames)
 
             face_images = []
@@ -133,7 +134,7 @@ class ProcessPipeline():
             
             refer_pose_meta = self.pose2d([refer_img])[0]
 
-            # 读取视频
+
             logger.info(f"Processing template video: {video_path}")
             video_reader = VideoReader(video_path)
             frame_num = len(video_reader)
@@ -160,7 +161,7 @@ class ProcessPipeline():
             frames = video_reader.get_batch(idxs).asnumpy()
 
             logger.info(f"Processing pose meta")
-            # 获取tpl和refer的pose_meta
+
             tpl_pose_meta0 = self.pose2d(frames[:1])[0]
             tpl_pose_metas = self.pose2d(frames)
 

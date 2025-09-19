@@ -2,7 +2,7 @@
 # This file wraps and extends sam2.utils.misc for custom modifications.
 
 from sam2.utils import misc as sam2_misc
-from sam2.utils.misc import *  # 复用原有内容
+from sam2.utils.misc import * 
 from PIL import Image
 import numpy as np
 import torch

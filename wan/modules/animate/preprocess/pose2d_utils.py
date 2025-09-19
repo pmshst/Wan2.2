@@ -1,4 +1,4 @@
-# Copyright (c) OpenMMLab. All rights reserved.
+# Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import warnings
 import cv2
 import numpy as np
@@ -104,7 +104,7 @@ class AAPoseMeta:
     
     @staticmethod
     def from_kps_face(kps_face: np.ndarray, height: int, width: int):
-        # kps_body: [20, 3]
+
         pose_meta = AAPoseMeta()
         pose_meta.kps_face = kps_face[:, :2]
         if kps_face.shape[1] == 3:
@@ -117,7 +117,7 @@ class AAPoseMeta:
 
     @staticmethod
     def from_kps_body(kps_body: np.ndarray, height: int, width: int):
-        # kps_body: [20, 3]
+
         pose_meta = AAPoseMeta()
         pose_meta.kps_body = kps_body[:, :2]
         pose_meta.kps_body_p = kps_body[:, 2]
@@ -142,9 +142,7 @@ class AAPoseMeta:
         return pose_meta
     
     def load_from_meta(self, meta, norm_body=True, norm_hand=False):
-        # keypoints_hand存的是原始坐标+概率，keypoints_body存的是归一化坐标无概率。
-        # kp_body中不可见的点直接标为None。
-        # 这里统一转化成原始坐标。不可见坐标点设为[0, 0]，且对应概率设为0。
+        
         self.image_id = meta.get("image_id", "00000.png")
         self.height = meta["height"]
         self.width = meta["width"]
@@ -170,7 +168,7 @@ class AAPoseMeta:
 
     @staticmethod
     def load_from_kp2ds(kp2ds: List[np.ndarray], width: int, height: int): 
-        """传入133x3的np关键点，返回AAPoseMeta
+        """input 133x3 numpy keypoints and output AAPoseMeta
 
         Args:
             kp2ds (List[np.ndarray]): _description_
@@ -1120,7 +1118,6 @@ def load_pose_metas_from_kp2ds_seq_list(kp2ds_seq, width, height):
         kps[:, 1] /= height
         kp2ds_body, kp2ds_lhand, kp2ds_rhand, kp2ds_face = split_kp2ds_for_aa(kps, ret_face=True)
 
-        # 排除全部小于0的情况
         if kp2ds_body[:, :2].min(axis=1).max() < 0:
             kp2ds_body = last_kp2ds_body
         last_kp2ds_body = kp2ds_body

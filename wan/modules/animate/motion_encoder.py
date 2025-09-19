@@ -1,5 +1,5 @@
 # Modified from ``https://github.com/wyhsirius/LIA``
-
+# Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
