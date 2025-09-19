@@ -1,12 +1,78 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
-import math
 
+# changed to run inference on 8GB VRAM
+# (generated frames limited to 21, increase if you have more VRAM)
+import gc
+import math
 import torch
 import torch.nn as nn
+import safetensors.torch
+
+from typing import List
+
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
 from .attention import flash_attention
+
+#from line_profiler import profile
+#from memory_profiler import profile
+
+
+class DynamicSwapInstaller:
+    @staticmethod
+    def _install_module(module: torch.nn.Module, **kwargs):
+        original_class = module.__class__
+        module.__dict__['forge_backup_original_class'] = original_class
+
+        def hacked_get_attr(self, name: str):
+            if '_parameters' in self.__dict__:
+                _parameters = self.__dict__['_parameters']
+                if name in _parameters:
+                    p = _parameters[name]
+                    if p is None:
+                        return None
+                    if p.__class__ == torch.nn.Parameter:
+                        return torch.nn.Parameter(p.to(**kwargs), requires_grad=p.requires_grad)
+                    else:
+                        return p.to(**kwargs)
+            if '_buffers' in self.__dict__:
+                _buffers = self.__dict__['_buffers']
+                if name in _buffers:
+                    return _buffers[name].to(**kwargs)
+            return super(original_class, self).__getattr__(name)
+
+        module.__class__ = type('DynamicSwap_' + original_class.__name__, (original_class,), {
+            '__getattr__': hacked_get_attr,
+        })
+
+        return
+
+    @staticmethod
+    def install_model(model: torch.nn.Module, **kwargs):
+        count_modules = 0
+        for m in model.modules():
+            count_modules += 1
+            DynamicSwapInstaller._install_module(m, **kwargs)
+        print("installed modules " + str(count_modules) + "\n")
+        return
+
+
+def print_tensor_size(tensor):
+    """Print tensor size in MB"""
+    size_bytes = tensor.element_size() * tensor.nelement()
+    size_mb = size_bytes / (1024 * 1024)  # Convert to MB
+    print(f"Tensor size: {size_mb:.2f} MB")
+    return size_mb
+
+
+def print_model_size(model):
+    """Print size of all model parameters in MB"""
+    total_params = sum(p.numel() for p in model.parameters())
+    total_size = total_params * 2  # Assuming float16 (2 bytes per parameter)
+    size_mb = total_size / (1024 * 1024)
+    print(f"Model size: {size_mb:.2f} MB ({total_params:,} parameters)")
+
 
 __all__ = ['WanModel']
 
@@ -48,14 +114,12 @@ def rope_apply(x, grid_sizes, freqs):
         seq_len = f * h * w
 
         # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
-            seq_len, n, -1, 2))
+        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(seq_len, n, -1, 2))
         freqs_i = torch.cat([
             freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
             freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
             freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ],
-                            dim=-1).reshape(seq_len, 1, -1)
+        ], dim=-1).reshape(seq_len, 1, -1)
 
         # apply rotary embedding
         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
@@ -234,10 +298,10 @@ class WanAttentionBlock(nn.Module):
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
-        assert e.dtype == torch.float32
+        #assert e.dtype == torch.float32
         with torch.amp.autocast('cuda', dtype=torch.float32):
             e = (self.modulation.unsqueeze(0) + e).chunk(6, dim=2)
-        assert e[0].dtype == torch.float32
+        #assert e[0].dtype == torch.float32
 
         # self-attention
         y = self.self_attn(
@@ -282,7 +346,7 @@ class Head(nn.Module):
             x(Tensor): Shape [B, L1, C]
             e(Tensor): Shape [B, L1, C]
         """
-        assert e.dtype == torch.float32
+        #assert e.dtype == torch.float32
         with torch.amp.autocast('cuda', dtype=torch.float32):
             e = (self.modulation.unsqueeze(0) + e.unsqueeze(2)).chunk(2, dim=2)
             x = (
@@ -301,6 +365,57 @@ class WanModel(ModelMixin, ConfigMixin):
     ]
     _no_split_modules = ['WanAttentionBlock']
 
+    def clear_mem(self):
+        self.blocks = None
+        for i in range(40):
+            if getattr(self, f"blocks{i}"):
+                delattr(self, f"blocks{i}")
+
+        self.patch_embedding = None
+        self.text_embedding = None
+        self.time_embedding = None
+        self.time_projection = None
+        self.head = None
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def _load_and_move_part_v1(self, part_name: str, part_class, *args, **kwargs):
+        file_path = self.model_path + part_name + '.safetensors'
+        attr_name = part_name.replace(".", "")
+
+        if getattr(self, attr_name):
+            return
+
+        part_state_dict = safetensors.torch.load_file(file_path, device="cpu")
+        with torch.device("meta"):
+            layer = part_class(*args, **kwargs)
+        layer = layer.to_empty(device="cpu")
+
+        if self.blocks_in_vram > 0 and part_name.split(".")[0] == "blocks" \
+                and int(part_name.split(".")[1]) < self.blocks_in_vram:
+            if getattr(self, attr_name) == None:
+                layer.load_state_dict(part_state_dict, assign=True)
+                layer.to('cuda', non_blocking=True)
+                setattr(self, attr_name, layer)
+            return
+
+        if part_name.split(".")[0] == "blocks" \
+                and int(part_name.split(".")[1]) >= 40 - self.blocks_in_ram:
+            layer.load_state_dict(part_state_dict, assign=True)
+            setattr(self, attr_name, layer)
+            DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
+        else:
+            if part_name.split(".")[0] == "blocks":
+                attr_name = "blocks"
+            if getattr(self, attr_name, layer):
+                getattr(self, attr_name, layer).load_state_dict(part_state_dict, assign=True)
+            else:
+                layer.load_state_dict(part_state_dict, assign=True)
+                setattr(self, attr_name, layer)
+                DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
+
+        return
+
     @register_to_config
     def __init__(self,
                  model_type='t2v',
@@ -317,7 +432,9 @@ class WanModel(ModelMixin, ConfigMixin):
                  window_size=(-1, -1),
                  qk_norm=True,
                  cross_attn_norm=True,
-                 eps=1e-6):
+                 eps=1e-6,
+                 blocks_in_ram=0,
+                 blocks_in_vram=0):
         r"""
         Initialize the diffusion model backbone.
 
@@ -356,6 +473,20 @@ class WanModel(ModelMixin, ConfigMixin):
 
         super().__init__()
 
+        if model_type == 't2v_h':
+            model_type = 't2v'
+            # todo: replace with your path to converted models see: optimize_files.py
+            self.model_path = "./Wan2.2-T2V-A14B/high_noise_model/"
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        if model_type == 't2v_l':
+            model_type = 't2v'
+            # todo: replace with your path to converted models see: optimize_files.py
+            self.model_path = "./Wan2.2-T2V-A14B/low_noise_model/"
+            gc.collect()
+            torch.cuda.empty_cache()
+
         assert model_type in ['t2v', 'i2v', 'ti2v', 's2v']
         self.model_type = model_type
 
@@ -375,24 +506,56 @@ class WanModel(ModelMixin, ConfigMixin):
         self.eps = eps
 
         # embeddings
-        self.patch_embedding = nn.Conv3d(
-            in_dim, dim, kernel_size=patch_size, stride=patch_size)
-        self.text_embedding = nn.Sequential(
-            nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
-            nn.Linear(dim, dim))
+        self.patch_embedding = None
+        self.text_embedding = None
 
-        self.time_embedding = nn.Sequential(
-            nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
-        self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
+        self.time_embedding = None
+        self.time_projection = None
 
         # blocks
-        self.blocks = nn.ModuleList([
-            WanAttentionBlock(dim, ffn_dim, num_heads, window_size, qk_norm,
-                              cross_attn_norm, eps) for _ in range(num_layers)
-        ])
+        self.blocks = None
+        self.blocks0 = None
+        self.blocks1 = None
+        self.blocks2 = None
+        self.blocks3 = None
+        self.blocks4 = None
+        self.blocks5 = None
+        self.blocks6 = None
+        self.blocks7 = None
+        self.blocks8 = None
+        self.blocks9 = None
+        self.blocks10 = None
+        self.blocks11 = None
+        self.blocks12 = None
+        self.blocks13 = None
+        self.blocks14 = None
+        self.blocks15 = None
+        self.blocks16 = None
+        self.blocks17 = None
+        self.blocks18 = None
+        self.blocks19 = None
+        self.blocks20 = None
+        self.blocks21 = None
+        self.blocks22 = None
+        self.blocks23 = None
+        self.blocks24 = None
+        self.blocks25 = None
+        self.blocks26 = None
+        self.blocks27 = None
+        self.blocks28 = None
+        self.blocks29 = None
+        self.blocks30 = None
+        self.blocks31 = None
+        self.blocks32 = None
+        self.blocks33 = None
+        self.blocks34 = None
+        self.blocks35 = None
+        self.blocks36 = None
+        self.blocks37 = None
+        self.blocks38 = None
+        self.blocks39 = None
 
-        # head
-        self.head = Head(dim, out_dim, patch_size, eps)
+        self.head = None
 
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
@@ -401,100 +564,166 @@ class WanModel(ModelMixin, ConfigMixin):
             rope_params(1024, d - 4 * (d // 6)),
             rope_params(1024, 2 * (d // 6)),
             rope_params(1024, 2 * (d // 6))
-        ],
-                               dim=1)
+        ], dim=1)
 
-        # initialize weights
-        self.init_weights()
+        self.blocks_in_ram = blocks_in_ram
+        print(f"\nRAM available for {self.blocks_in_ram}/40 blocks\n")
 
+        self.blocks_in_vram = blocks_in_vram
+        print(f"\nVRAM available for {self.blocks_in_vram}/40 blocks\n")
+
+    # batch forward
     def forward(
-        self,
-        x,
-        t,
-        context,
-        seq_len,
-        y=None,
+            self,
+            x,
+            t,
+            context,
+            context_null,
+            seq_len,
+            y=None,
     ):
-        r"""
-        Forward pass through the diffusion model
+        # --- Part 1: Embeddings ---
+        if not self.patch_embedding:
+            print("Loading patch_embedding to CUDA...")
+            self._load_and_move_part_v1(
+                "patch_embedding", nn.Conv3d,
+                in_channels=self.in_dim, out_channels=self.dim,
+                kernel_size=self.patch_size, stride=self.patch_size
+            )
 
-        Args:
-            x (List[Tensor]):
-                List of input video tensors, each with shape [C_in, F, H, W]
-            t (Tensor):
-                Diffusion timesteps tensor of shape [B]
-            context (List[Tensor]):
-                List of text embeddings each with shape [L, C]
-            seq_len (`int`):
-                Maximum sequence length for positional encoding
-            y (List[Tensor], *optional*):
-                Conditional video inputs for image-to-video mode, same shape as x
-
-        Returns:
-            List[Tensor]:
-                List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
-        """
-        if self.model_type == 'i2v':
-            assert y is not None
-        # params
         device = self.patch_embedding.weight.device
-        if self.freqs.device != device:
-            self.freqs = self.freqs.to(device)
-
         if y is not None:
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
-        # embeddings
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
+        # Move input data to the device for the operation
+        x = [self.patch_embedding(u.unsqueeze(0).to(device)) for u in x]
         grid_sizes = torch.stack(
             [torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
         x = [u.flatten(2).transpose(1, 2) for u in x]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
-        assert seq_lens.max() <= seq_len
-        x = torch.cat([
-            torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))],
-                      dim=1) for u in x
-        ])
+        x = torch.cat(
+            [torch.cat(
+                [u, u.new_zeros(1, seq_len - u.size(1), u.size(2))], dim=1) for u in x])
 
-        # time embeddings
-        if t.dim() == 1:
-            t = t.expand(t.size(0), seq_len)
-        with torch.amp.autocast('cuda', dtype=torch.float32):
-            bt = t.size(0)
-            t = t.flatten()
-            e = self.time_embedding(
-                sinusoidal_embedding_1d(self.freq_dim,
-                                        t).unflatten(0, (bt, seq_len)).float())
-            e0 = self.time_projection(e).unflatten(2, (6, self.dim))
-            assert e.dtype == torch.float32 and e0.dtype == torch.float32
+        if not self.time_embedding:
+            print("Loading time_embedding to CUDA...")
+            self._load_and_move_part_v1("time_embedding", nn.Sequential,
+                                     nn.Linear(self.freq_dim, self.dim),
+                                     nn.SiLU(),
+                                     nn.Linear(self.dim, self.dim))
+        if not self.time_projection:
+            print("Loading time_projection to CUDA...")
+            self._load_and_move_part_v1("time_projection", nn.Sequential,
+                                     nn.SiLU(),
+                                     nn.Linear(self.dim, self.dim * 6))
 
-        # context
-        context_lens = None
+        t_device = t.to(device)
+        if t_device.dim() == 1:
+            t_device = t_device.expand(t_device.size(0), seq_len)
+        sin_embed = sinusoidal_embedding_1d(self.freq_dim,
+                    t_device.flatten()).unflatten(0, (t_device.size(0), seq_len))
+        target_dtype = self.time_embedding[0].weight.dtype
+        sin_embed = sin_embed.to(device, dtype=target_dtype)
+
+        e = self.time_embedding(sin_embed)
+
+        del sin_embed
+
+        e0 = self.time_projection(e).unflatten(2, (6, self.dim))
+
+        if not self.text_embedding:
+            print("Loading text_embedding to CUDA...")
+            self._load_and_move_part_v1("text_embedding", nn.Sequential,
+                                     nn.Linear(self.text_dim, self.dim),
+                                     nn.GELU(approximate='tanh'),
+                                     nn.Linear(self.dim, self.dim))
+
         context = self.text_embedding(
-            torch.stack([
-                torch.cat(
-                    [u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
-                for u in context
-            ]))
+            torch.stack(
+                [torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
+                 for u in context]).to(device)
+        )
+        if context_null != None:
+            context_null = self.text_embedding(
+                torch.stack(
+                    [torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
+                     for u in context_null]).to(device)
+            )
 
-        # arguments
-        kwargs = dict(
-            e=e0,
-            seq_lens=seq_lens,
-            grid_sizes=grid_sizes,
-            freqs=self.freqs,
-            context=context,
-            context_lens=context_lens)
+        # --- Part 2: Main Blocks Loop ---
+        kwargs = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes,
+                      freqs=self.freqs.to(device), context=context, context_lens=None)
+        if context_null != None:
+            kwargs_null = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes,
+                               freqs=self.freqs.to(device), context=context_null, context_lens=None)
+        else:
+            kwargs_null = None
 
-        for block in self.blocks:
+        del seq_lens, context, context_null, e0
+        torch.cuda.empty_cache()
+
+        x_null = x.clone()
+        for i in range(self.num_layers):
+            block_name = f"blocks.{i}"
+            if i < self.blocks_in_vram or i >= 40 - self.blocks_in_ram:
+                if i < self.blocks_in_vram:
+                    print(f"Loading {block_name} VRAM")
+                else:
+                    print(f"Loading {block_name} RAM")
+                self._load_and_move_part_v1(
+                    block_name, WanAttentionBlock,
+                    dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
+                    window_size=self.window_size, qk_norm=self.qk_norm,
+                    cross_attn_norm=self.cross_attn_norm, eps=self.eps
+                )
+                block = getattr(self, f"blocks{i}")
+            else:
+                print(f"Loading {block_name} DISC")
+                self._load_and_move_part_v1(
+                    block_name, WanAttentionBlock,
+                    dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
+                    window_size=self.window_size, qk_norm=self.qk_norm,
+                    cross_attn_norm=self.cross_attn_norm, eps=self.eps
+                )
+                block = getattr(self, "blocks")
+
             x = block(x, **kwargs)
+            if kwargs_null:
+                x_null = block(x_null, **kwargs_null)
+            else:
+                x_null = None
 
-        # head
-        x = self.head(x, e)
+        # --- Part 3: Head and Unpatchify ---
 
-        # unpatchify
+        if not self.head:
+            print("Loading head to CUDA...")
+            self._load_and_move_part_v1(
+                "head", Head,
+                dim=self.dim,
+                out_dim=self.out_dim,
+                patch_size=self.patch_size,
+                eps=self.eps
+            )
+        x = self.head(
+            x.to(device),
+            e)
+        if kwargs_null:
+            x_null = self.head(x_null.to(device), e)
+
+        del e
+
+        print("Performing unpatchify...")
         x = self.unpatchify(x, grid_sizes)
-        return [u.float() for u in x]
+        if kwargs_null:
+            x_null = self.unpatchify(x_null, grid_sizes)
+        else:
+            x_null = []
+
+        del grid_sizes
+
+        return [u
+                for u in x], [u
+                for u in x_null]
 
     def unpatchify(self, x, grid_sizes):
         r"""
@@ -520,27 +749,3 @@ class WanModel(ModelMixin, ConfigMixin):
             u = u.reshape(c, *[i * j for i, j in zip(v, self.patch_size)])
             out.append(u)
         return out
-
-    def init_weights(self):
-        r"""
-        Initialize model parameters using Xavier initialization.
-        """
-
-        # basic init
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-        # init embeddings
-        nn.init.xavier_uniform_(self.patch_embedding.weight.flatten(1))
-        for m in self.text_embedding.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, std=.02)
-        for m in self.time_embedding.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, std=.02)
-
-        # init output layer
-        nn.init.zeros_(self.head.head.weight)
