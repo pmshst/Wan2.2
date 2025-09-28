@@ -12,8 +12,8 @@ We are excited to release the distilled version of <a href="https://wan.video"><
 - **Complex Motion Generation**: Despite the reduction to just 4 steps, the model retains excellent motion dynamics in the generated scenes.
 
 ## 🔥 Latest News!!
-
-* Aug 08, 2025: 👋 Release of Native ComfyUI Workflows.
+* Sep 28, 2025: 👋 Release [Wan2.2-T2V-A14B-NFE4-0928](https://huggingface.co/lightx2v/Wan2.2-Lightning/tree/main/Wan2.2-T2V-A14B-4steps-lora-250928), a preview version of V2.0. This update features enhanced camera controllability and improved motion dynamics. Please see the [comparison](#wan22-t2v-a14b-nfe4-v11-vs-wan22-t2v-a14b-nfe4-250928). We are actively working to further enhance its quality. 
+* Aug 08, 2025: 👋 Release Native ComfyUI Workflows.
 
  <!-- and [lora weights](https://hf-mirror.com/lightx2v/Wan2.2-Lightning/tree/main) for the `Wan2.2-Lightning` models! -->
 
@@ -49,16 +49,21 @@ We are excited to release the distilled version of <a href="https://wan.video"><
   </tbody>
 </table>
 
-* Aug 07, 2025: 👋 Release of [Wan2.2-I2V-A14B-NFE4-V1](https://huggingface.co/lightx2v/Wan2.2-Lightning/tree/main/Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1).
+* Aug 07, 2025: 👋 Release [Wan2.2-I2V-A14B-NFE4-V1](https://huggingface.co/lightx2v/Wan2.2-Lightning/tree/main/Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1).
  <!-- A [workflow](https://hf-mirror.com/lightx2v/Wan2.2-Lightning/blob/main/Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1-forKJ.json) compatible with [Kijai's ComfyUI WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) is inside this link. Enjoy! -->
-* Aug 07, 2025: 👋 Release of [Wan2.2-T2V-A14B-NFE4-V1.1](https://huggingface.co/lightx2v/Wan2.2-Lightning/tree/main/Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1). The generation quality of V1.1 is slightly better than V1.
+* Aug 07, 2025: 👋 Release [Wan2.2-T2V-A14B-NFE4-V1.1](https://huggingface.co/lightx2v/Wan2.2-Lightning/tree/main/Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1). The generation quality of V1.1 is slightly better than V1.
 
 <!-- A [workflow](https://hf-mirror.com/lightx2v/Wan2.2-Lightning/blob/main/Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1/Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1-forKJ.json) compatible with [Kijai's ComfyUI WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) is inside this link. The generation quality of V1.1 is slightly better than V1. Enjoy! -->
-* Aug 04, 2025: 👋 Release of [Wan2.2-T2V-A14B-NFE4-V1](https://huggingface.co/lightx2v/Wan2.2-Lightning/tree/main/Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1).
+* Aug 04, 2025: 👋 Release [Wan2.2-T2V-A14B-NFE4-V1](https://huggingface.co/lightx2v/Wan2.2-Lightning/tree/main/Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1).
 
 <!-- - [Kijai's ComfyUI WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) is an implementation of Wan models for ComfyUI. Thanks to its Wan-only focus, it's on the frontline of getting cutting edge optimizations and hot research features. -->
 
 ## Video Demos
+
+### Wan2.2-T2V-A14B-NFE4-V1.1 vs Wan2.2-T2V-A14B-NFE4-250928
+The videos below can be reproduced using [examples/i2v_prompt_list.txt](examples/motion_and_camera.txt) with seed 42.
+<video src="https://huggingface.co/lightx2v/Wan2.2-Lightning/blob/main/Wan2.2-T2V-A14B-4steps-lora-250928/v1.1-vs-250928.mp4" width="60%" controls loop></video>
+
 ### Wan2.2-I2V-A14B-NFE4-V1 Demo
 
 The videos below can be reproduced using [examples/i2v_prompt_list.txt](examples/i2v_prompt_list.txt) and [examples/i2v_image_path_list.txt](examples/i2v_image_path_list.txt).
