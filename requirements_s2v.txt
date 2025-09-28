@@ -1,0 +1,12 @@
+# Optional dependencies for Wan Speech-to-Video pipelines (audio / TTS)
+HyperPyYAML
+inflect
+librosa
+lightning
+rich
+gdown
+wget
+pyarrow
+pyworld
+modelscope
+GitPython

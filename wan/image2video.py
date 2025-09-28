@@ -88,36 +88,44 @@ class WanI2V:
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
             dtype=config.t5_dtype,
-            device=torch.device('cpu'),
+            device=torch.device("cpu"),
             checkpoint_path=os.path.join(checkpoint_dir, config.t5_checkpoint),
             tokenizer_path=os.path.join(checkpoint_dir, config.t5_tokenizer),
             shard_fn=shard_fn if t5_fsdp else None,
         )
+        # Diffusers-style handle to tokenizer
+        self.tokenizer = self.text_encoder.tokenizer
+        self._text_encoder_offloaded = False
 
         self.vae_stride = config.vae_stride
         self.patch_size = config.patch_size
         self.vae = Wan2_1_VAE(
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
-            device=self.device)
+            device=self.device,
+        )
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.low_noise_model = WanModel.from_pretrained(
-            checkpoint_dir, subfolder=config.low_noise_checkpoint)
+            checkpoint_dir, subfolder=config.low_noise_checkpoint
+        )
         self.low_noise_model = self._configure_model(
             model=self.low_noise_model,
             use_sp=use_sp,
             dit_fsdp=dit_fsdp,
             shard_fn=shard_fn,
-            convert_model_dtype=convert_model_dtype)
+            convert_model_dtype=convert_model_dtype,
+        )
 
         self.high_noise_model = WanModel.from_pretrained(
-            checkpoint_dir, subfolder=config.high_noise_checkpoint)
+            checkpoint_dir, subfolder=config.high_noise_checkpoint
+        )
         self.high_noise_model = self._configure_model(
             model=self.high_noise_model,
             use_sp=use_sp,
             dit_fsdp=dit_fsdp,
             shard_fn=shard_fn,
-            convert_model_dtype=convert_model_dtype)
+            convert_model_dtype=convert_model_dtype,
+        )
         if use_sp:
             self.sp_size = get_world_size()
         else:
@@ -125,8 +133,20 @@ class WanI2V:
 
         self.sample_neg_prompt = config.sample_neg_prompt
 
-    def _configure_model(self, model, use_sp, dit_fsdp, shard_fn,
-                         convert_model_dtype):
+    # Optional diffusers-style API for memory optimization
+    def enable_model_cpu_offload(self):
+        self.init_on_cpu = True
+
+    def enable_sequential_cpu_offload(self):
+        self.enable_model_cpu_offload()
+
+    def enable_attention_slicing(self, *args, **kwargs):
+        logging.info("attention slicing not applicable; using custom attention.")
+
+    def enable_xformers_memory_efficient_attention(self):
+        logging.info("xFormers toggle ignored; using built-in optimized attention.")
+
+    def _configure_model(self, model, use_sp, dit_fsdp, shard_fn, convert_model_dtype):
         """
         Configures a model object. This includes setting evaluation modes,
         applying distributed parallel strategy, and handling device placement.
@@ -153,7 +173,8 @@ class WanI2V:
         if use_sp:
             for block in model.blocks:
                 block.self_attn.forward = types.MethodType(
-                    sp_attn_forward, block.self_attn)
+                    sp_attn_forward, block.self_attn
+                )
             model.forward = types.MethodType(sp_dit_forward, model)
 
         if dist.is_initialized():
@@ -187,34 +208,41 @@ class WanI2V:
                 The active model on the target device for the current timestep.
         """
         if t.item() >= boundary:
-            required_model_name = 'high_noise_model'
-            offload_model_name = 'low_noise_model'
+            required_model_name = "high_noise_model"
+            offload_model_name = "low_noise_model"
         else:
-            required_model_name = 'low_noise_model'
-            offload_model_name = 'high_noise_model'
+            required_model_name = "low_noise_model"
+            offload_model_name = "high_noise_model"
         if offload_model or self.init_on_cpu:
-            if next(getattr(
-                    self,
-                    offload_model_name).parameters()).device.type == 'cuda':
-                getattr(self, offload_model_name).to('cpu')
-            if next(getattr(
-                    self,
-                    required_model_name).parameters()).device.type == 'cpu':
+            if (
+                next(getattr(self, offload_model_name).parameters()).device.type
+                == "cuda"
+            ):
+                getattr(self, offload_model_name).to("cpu")
+            if (
+                next(getattr(self, required_model_name).parameters()).device.type
+                == "cpu"
+            ):
                 getattr(self, required_model_name).to(self.device)
         return getattr(self, required_model_name)
 
-    def generate(self,
-                 input_prompt,
-                 img,
-                 max_area=720 * 1280,
-                 frame_num=81,
-                 shift=5.0,
-                 sample_solver='unipc',
-                 sampling_steps=40,
-                 guide_scale=5.0,
-                 n_prompt="",
-                 seed=-1,
-                 offload_model=True):
+    def generate(
+        self,
+        input_prompt,
+        img,
+        max_area=720 * 1280,
+        frame_num=81,
+        shift=5.0,
+        sample_solver="unipc",
+        sampling_steps=40,
+        guide_scale=5.0,
+        n_prompt="",
+        seed=-1,
+        offload_model=True,
+        prompt_embeds=None,
+        negative_prompt_embeds=None,
+        precision: str = "fp16",
+    ):
         r"""
         Generates video frames from input image and text prompt using diffusion process.
 
@@ -254,24 +282,37 @@ class WanI2V:
                 - W: Frame width from max_area)
         """
         # preprocess
-        guide_scale = (guide_scale, guide_scale) if isinstance(
-            guide_scale, float) else guide_scale
+        guide_scale = (
+            (guide_scale, guide_scale)
+            if isinstance(guide_scale, float)
+            else guide_scale
+        )
         img = TF.to_tensor(img).sub_(0.5).div_(0.5).to(self.device)
 
         F = frame_num
         h, w = img.shape[1:]
         aspect_ratio = h / w
         lat_h = round(
-            np.sqrt(max_area * aspect_ratio) // self.vae_stride[1] //
-            self.patch_size[1] * self.patch_size[1])
+            np.sqrt(max_area * aspect_ratio)
+            // self.vae_stride[1]
+            // self.patch_size[1]
+            * self.patch_size[1]
+        )
         lat_w = round(
-            np.sqrt(max_area / aspect_ratio) // self.vae_stride[2] //
-            self.patch_size[2] * self.patch_size[2])
+            np.sqrt(max_area / aspect_ratio)
+            // self.vae_stride[2]
+            // self.patch_size[2]
+            * self.patch_size[2]
+        )
         h = lat_h * self.vae_stride[1]
         w = lat_w * self.vae_stride[2]
 
-        max_seq_len = ((F - 1) // self.vae_stride[0] + 1) * lat_h * lat_w // (
-            self.patch_size[1] * self.patch_size[2])
+        max_seq_len = (
+            ((F - 1) // self.vae_stride[0] + 1)
+            * lat_h
+            * lat_w
+            // (self.patch_size[1] * self.patch_size[2])
+        )
         max_seq_len = int(math.ceil(max_seq_len / self.sp_size)) * self.sp_size
 
         seed = seed if seed >= 0 else random.randint(0, sys.maxsize)
@@ -284,80 +325,138 @@ class WanI2V:
             lat_w,
             dtype=torch.float32,
             generator=seed_g,
-            device=self.device)
+            device=self.device,
+        )
 
         msk = torch.ones(1, F, lat_h, lat_w, device=self.device)
         msk[:, 1:] = 0
-        msk = torch.concat([
-            torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]
-        ],
-                           dim=1)
+        msk = torch.concat(
+            [torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]], dim=1
+        )
         msk = msk.view(1, msk.shape[1] // 4, 4, lat_h, lat_w)
         msk = msk.transpose(1, 2)[0]
 
         if n_prompt == "":
             n_prompt = self.sample_neg_prompt
 
-        # preprocess
-        if not self.t5_cpu:
-            self.text_encoder.model.to(self.device)
-            context = self.text_encoder([input_prompt], self.device)
-            context_null = self.text_encoder([n_prompt], self.device)
-            if offload_model:
-                self.text_encoder.model.cpu()
+        # Text conditioning
+        if prompt_embeds is not None or negative_prompt_embeds is not None:
+            if isinstance(guide_scale, tuple) and (negative_prompt_embeds is None):
+                raise ValueError(
+                    "negative_prompt_embeds must be provided when using guidance."
+                )
+            context = prompt_embeds
+            context_null = (
+                negative_prompt_embeds if negative_prompt_embeds is not None else []
+            )
+            if self.text_encoder is not None:
+                logging.warning(
+                    "prompt_embeds provided; preventing redundant text encoding."
+                )
+                if hasattr(self.text_encoder, "model"):
+                    self.text_encoder.model.cpu()
+                self._text_encoder_offloaded = True
+            target_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
+            context = [t.to(dtype=target_dtype, device=self.device) for t in context]
+            context_null = [
+                t.to(dtype=target_dtype, device=self.device) for t in context_null
+            ]
         else:
-            context = self.text_encoder([input_prompt], torch.device('cpu'))
-            context_null = self.text_encoder([n_prompt], torch.device('cpu'))
-            context = [t.to(self.device) for t in context]
-            context_null = [t.to(self.device) for t in context_null]
+            if self.text_encoder is None:
+                raise RuntimeError(
+                    "text_encoder is not available. Provide prompt_embeds to generate()."
+                )
+            with torch.inference_mode():
+                self.text_encoder.model.eval()
+                if not self.t5_cpu:
+                    self.text_encoder.model.to(self.device)
+                    context = self.text_encoder([input_prompt], self.device)
+                    context_null = self.text_encoder([n_prompt], self.device)
+                else:
+                    context = self.text_encoder([input_prompt], torch.device("cpu"))
+                    context_null = self.text_encoder([n_prompt], torch.device("cpu"))
+                    context = [t.to(self.device) for t in context]
+                    context_null = [t.to(self.device) for t in context_null]
+                target_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
+                context = [
+                    t.to(dtype=target_dtype, device=self.device) for t in context
+                ]
+                context_null = [
+                    t.to(dtype=target_dtype, device=self.device) for t in context_null
+                ]
+            try:
+                if hasattr(torch.cuda, "memory_summary") and torch.cuda.is_available():
+                    logging.info(
+                        "CUDA memory before T5 offload:\n"
+                        + torch.cuda.memory_summary(device=self.device)
+                    )
+            except Exception:
+                pass
+            if hasattr(self.text_encoder, "model"):
+                self.text_encoder.model.cpu()
+            self._text_encoder_offloaded = True
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                try:
+                    logging.info(
+                        "CUDA memory after T5 offload:\n"
+                        + torch.cuda.memory_summary(device=self.device)
+                    )
+                except Exception:
+                    pass
 
-        y = self.vae.encode([
-            torch.concat([
-                torch.nn.functional.interpolate(
-                    img[None].cpu(), size=(h, w), mode='bicubic').transpose(
-                        0, 1),
-                torch.zeros(3, F - 1, h, w)
-            ],
-                         dim=1).to(self.device)
-        ])[0]
+        y = self.vae.encode(
+            [
+                torch.concat(
+                    [
+                        torch.nn.functional.interpolate(
+                            img[None].cpu(), size=(h, w), mode="bicubic"
+                        ).transpose(0, 1),
+                        torch.zeros(3, F - 1, h, w),
+                    ],
+                    dim=1,
+                ).to(self.device)
+            ]
+        )[0]
         y = torch.concat([msk, y])
 
         @contextmanager
         def noop_no_sync():
             yield
 
-        no_sync_low_noise = getattr(self.low_noise_model, 'no_sync',
-                                    noop_no_sync)
-        no_sync_high_noise = getattr(self.high_noise_model, 'no_sync',
-                                     noop_no_sync)
+        no_sync_low_noise = getattr(self.low_noise_model, "no_sync", noop_no_sync)
+        no_sync_high_noise = getattr(self.high_noise_model, "no_sync", noop_no_sync)
 
         # evaluation mode
         with (
-                torch.amp.autocast('cuda', dtype=self.param_dtype),
-                torch.no_grad(),
-                no_sync_low_noise(),
-                no_sync_high_noise(),
+            torch.amp.autocast("cuda", dtype=self.param_dtype),
+            torch.no_grad(),
+            no_sync_low_noise(),
+            no_sync_high_noise(),
         ):
             boundary = self.boundary * self.num_train_timesteps
 
-            if sample_solver == 'unipc':
+            if sample_solver == "unipc":
                 sample_scheduler = FlowUniPCMultistepScheduler(
                     num_train_timesteps=self.num_train_timesteps,
                     shift=1,
-                    use_dynamic_shifting=False)
+                    use_dynamic_shifting=False,
+                )
                 sample_scheduler.set_timesteps(
-                    sampling_steps, device=self.device, shift=shift)
+                    sampling_steps, device=self.device, shift=shift
+                )
                 timesteps = sample_scheduler.timesteps
-            elif sample_solver == 'dpm++':
+            elif sample_solver == "dpm++":
                 sample_scheduler = FlowDPMSolverMultistepScheduler(
                     num_train_timesteps=self.num_train_timesteps,
                     shift=1,
-                    use_dynamic_shifting=False)
+                    use_dynamic_shifting=False,
+                )
                 sampling_sigmas = get_sampling_sigmas(sampling_steps, shift)
                 timesteps, _ = retrieve_timesteps(
-                    sample_scheduler,
-                    device=self.device,
-                    sigmas=sampling_sigmas)
+                    sample_scheduler, device=self.device, sigmas=sampling_sigmas
+                )
             else:
                 raise NotImplementedError("Unsupported solver.")
 
@@ -365,15 +464,15 @@ class WanI2V:
             latent = noise
 
             arg_c = {
-                'context': [context[0]],
-                'seq_len': max_seq_len,
-                'y': [y],
+                "context": [context[0]],
+                "seq_len": max_seq_len,
+                "y": [y],
             }
 
             arg_null = {
-                'context': context_null,
-                'seq_len': max_seq_len,
-                'y': [y],
+                "context": context_null,
+                "seq_len": max_seq_len,
+                "y": [y],
             }
 
             if offload_model:
@@ -385,28 +484,28 @@ class WanI2V:
 
                 timestep = torch.stack(timestep).to(self.device)
 
-                model = self._prepare_model_for_timestep(
-                    t, boundary, offload_model)
-                sample_guide_scale = guide_scale[1] if t.item(
-                ) >= boundary else guide_scale[0]
+                model = self._prepare_model_for_timestep(t, boundary, offload_model)
+                sample_guide_scale = (
+                    guide_scale[1] if t.item() >= boundary else guide_scale[0]
+                )
 
-                noise_pred_cond = model(
-                    latent_model_input, t=timestep, **arg_c)[0]
+                noise_pred_cond = model(latent_model_input, t=timestep, **arg_c)[0]
                 if offload_model:
                     torch.cuda.empty_cache()
-                noise_pred_uncond = model(
-                    latent_model_input, t=timestep, **arg_null)[0]
+                noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0]
                 if offload_model:
                     torch.cuda.empty_cache()
                 noise_pred = noise_pred_uncond + sample_guide_scale * (
-                    noise_pred_cond - noise_pred_uncond)
+                    noise_pred_cond - noise_pred_uncond
+                )
 
                 temp_x0 = sample_scheduler.step(
                     noise_pred.unsqueeze(0),
                     t,
                     latent.unsqueeze(0),
                     return_dict=False,
-                    generator=seed_g)[0]
+                    generator=seed_g,
+                )[0]
                 latent = temp_x0.squeeze(0)
 
                 x0 = [latent]

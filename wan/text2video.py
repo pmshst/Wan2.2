@@ -86,35 +86,45 @@ class WanT2V:
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
             dtype=config.t5_dtype,
-            device=torch.device('cpu'),
+            device=torch.device("cpu"),
             checkpoint_path=os.path.join(checkpoint_dir, config.t5_checkpoint),
             tokenizer_path=os.path.join(checkpoint_dir, config.t5_tokenizer),
-            shard_fn=shard_fn if t5_fsdp else None)
+            shard_fn=shard_fn if t5_fsdp else None,
+        )
+        # Diffusers-style handle to tokenizer for external use
+        self.tokenizer = self.text_encoder.tokenizer
+        # Track if text encoder has been offloaded/removed
+        self._text_encoder_offloaded = False
 
         self.vae_stride = config.vae_stride
         self.patch_size = config.patch_size
         self.vae = Wan2_1_VAE(
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
-            device=self.device)
+            device=self.device,
+        )
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.low_noise_model = WanModel.from_pretrained(
-            checkpoint_dir, subfolder=config.low_noise_checkpoint)
+            checkpoint_dir, subfolder=config.low_noise_checkpoint
+        )
         self.low_noise_model = self._configure_model(
             model=self.low_noise_model,
             use_sp=use_sp,
             dit_fsdp=dit_fsdp,
             shard_fn=shard_fn,
-            convert_model_dtype=convert_model_dtype)
+            convert_model_dtype=convert_model_dtype,
+        )
 
         self.high_noise_model = WanModel.from_pretrained(
-            checkpoint_dir, subfolder=config.high_noise_checkpoint)
+            checkpoint_dir, subfolder=config.high_noise_checkpoint
+        )
         self.high_noise_model = self._configure_model(
             model=self.high_noise_model,
             use_sp=use_sp,
             dit_fsdp=dit_fsdp,
             shard_fn=shard_fn,
-            convert_model_dtype=convert_model_dtype)
+            convert_model_dtype=convert_model_dtype,
+        )
         if use_sp:
             self.sp_size = get_world_size()
         else:
@@ -122,8 +132,24 @@ class WanT2V:
 
         self.sample_neg_prompt = config.sample_neg_prompt
 
-    def _configure_model(self, model, use_sp, dit_fsdp, shard_fn,
-                         convert_model_dtype):
+    # Optional diffusers-style API for memory optimization
+    def enable_model_cpu_offload(self):
+        """Enable CPU offload of the DiT during sampling."""
+        self.init_on_cpu = True
+
+    def enable_sequential_cpu_offload(self):
+        """Alias for compatibility with diffusers API."""
+        self.enable_model_cpu_offload()
+
+    def enable_attention_slicing(self, *args, **kwargs):
+        """No-op placeholder for API compatibility."""
+        logging.info("attention slicing not applicable; using custom attention.")
+
+    def enable_xformers_memory_efficient_attention(self):
+        """No-op placeholder; flash-attn path already optimized in WanModel."""
+        logging.info("xFormers toggle ignored; using built-in optimized attention.")
+
+    def _configure_model(self, model, use_sp, dit_fsdp, shard_fn, convert_model_dtype):
         """
         Configures a model object. This includes setting evaluation modes,
         applying distributed parallel strategy, and handling device placement.
@@ -150,7 +176,8 @@ class WanT2V:
         if use_sp:
             for block in model.blocks:
                 block.self_attn.forward = types.MethodType(
-                    sp_attn_forward, block.self_attn)
+                    sp_attn_forward, block.self_attn
+                )
             model.forward = types.MethodType(sp_dit_forward, model)
 
         if dist.is_initialized():
@@ -184,33 +211,40 @@ class WanT2V:
                 The active model on the target device for the current timestep.
         """
         if t.item() >= boundary:
-            required_model_name = 'high_noise_model'
-            offload_model_name = 'low_noise_model'
+            required_model_name = "high_noise_model"
+            offload_model_name = "low_noise_model"
         else:
-            required_model_name = 'low_noise_model'
-            offload_model_name = 'high_noise_model'
+            required_model_name = "low_noise_model"
+            offload_model_name = "high_noise_model"
         if offload_model or self.init_on_cpu:
-            if next(getattr(
-                    self,
-                    offload_model_name).parameters()).device.type == 'cuda':
-                getattr(self, offload_model_name).to('cpu')
-            if next(getattr(
-                    self,
-                    required_model_name).parameters()).device.type == 'cpu':
+            if (
+                next(getattr(self, offload_model_name).parameters()).device.type
+                == "cuda"
+            ):
+                getattr(self, offload_model_name).to("cpu")
+            if (
+                next(getattr(self, required_model_name).parameters()).device.type
+                == "cpu"
+            ):
                 getattr(self, required_model_name).to(self.device)
         return getattr(self, required_model_name)
 
-    def generate(self,
-                 input_prompt,
-                 size=(1280, 720),
-                 frame_num=81,
-                 shift=5.0,
-                 sample_solver='unipc',
-                 sampling_steps=50,
-                 guide_scale=5.0,
-                 n_prompt="",
-                 seed=-1,
-                 offload_model=True):
+    def generate(
+        self,
+        input_prompt,
+        size=(1280, 720),
+        frame_num=81,
+        shift=5.0,
+        sample_solver="unipc",
+        sampling_steps=50,
+        guide_scale=5.0,
+        n_prompt="",
+        seed=-1,
+        offload_model=True,
+        prompt_embeds=None,
+        negative_prompt_embeds=None,
+        precision: str = "fp16",
+    ):
         r"""
         Generates video frames from text prompt using diffusion process.
 
@@ -247,16 +281,28 @@ class WanT2V:
                 - W: Frame width from size)
         """
         # preprocess
-        guide_scale = (guide_scale, guide_scale) if isinstance(
-            guide_scale, float) else guide_scale
+        guide_scale = (
+            (guide_scale, guide_scale)
+            if isinstance(guide_scale, float)
+            else guide_scale
+        )
         F = frame_num
-        target_shape = (self.vae.model.z_dim, (F - 1) // self.vae_stride[0] + 1,
-                        size[1] // self.vae_stride[1],
-                        size[0] // self.vae_stride[2])
+        target_shape = (
+            self.vae.model.z_dim,
+            (F - 1) // self.vae_stride[0] + 1,
+            size[1] // self.vae_stride[1],
+            size[0] // self.vae_stride[2],
+        )
 
-        seq_len = math.ceil((target_shape[2] * target_shape[3]) /
-                            (self.patch_size[1] * self.patch_size[2]) *
-                            target_shape[1] / self.sp_size) * self.sp_size
+        seq_len = (
+            math.ceil(
+                (target_shape[2] * target_shape[3])
+                / (self.patch_size[1] * self.patch_size[2])
+                * target_shape[1]
+                / self.sp_size
+            )
+            * self.sp_size
+        )
 
         if n_prompt == "":
             n_prompt = self.sample_neg_prompt
@@ -264,17 +310,79 @@ class WanT2V:
         seed_g = torch.Generator(device=self.device)
         seed_g.manual_seed(seed)
 
-        if not self.t5_cpu:
-            self.text_encoder.model.to(self.device)
-            context = self.text_encoder([input_prompt], self.device)
-            context_null = self.text_encoder([n_prompt], self.device)
-            if offload_model:
-                self.text_encoder.model.cpu()
+        # Handle text conditioning
+        if prompt_embeds is not None or negative_prompt_embeds is not None:
+            # Defensive: ensure both are provided when CFG is used
+            if guide_scale is not None and (negative_prompt_embeds is None):
+                raise ValueError(
+                    "negative_prompt_embeds must be provided when using guidance."
+                )
+            context = prompt_embeds
+            context_null = (
+                negative_prompt_embeds if negative_prompt_embeds is not None else []
+            )
+            # If user provides embeds, ensure encoder weights are off GPU
+            if self.text_encoder is not None:
+                logging.warning(
+                    "prompt_embeds provided; preventing pipeline from re-encoding prompts."
+                )
+                if hasattr(self.text_encoder, "model"):
+                    self.text_encoder.model.cpu()
+                self._text_encoder_offloaded = True
+            # Cast dtype as requested
+            target_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
+            context = [t.to(dtype=target_dtype, device=self.device) for t in context]
+            context_null = [
+                t.to(dtype=target_dtype, device=self.device) for t in context_null
+            ]
         else:
-            context = self.text_encoder([input_prompt], torch.device('cpu'))
-            context_null = self.text_encoder([n_prompt], torch.device('cpu'))
-            context = [t.to(self.device) for t in context]
-            context_null = [t.to(self.device) for t in context_null]
+            # Compute on the fly, then offload encoder immediately
+            if self.text_encoder is None:
+                raise RuntimeError(
+                    "text_encoder is not available. Provide prompt_embeds to generate()."
+                )
+            # Embedding computation without grads
+            with torch.inference_mode():
+                self.text_encoder.model.eval()
+                if not self.t5_cpu:
+                    self.text_encoder.model.to(self.device)
+                    context = self.text_encoder([input_prompt], self.device)
+                    context_null = self.text_encoder([n_prompt], self.device)
+                else:
+                    context = self.text_encoder([input_prompt], torch.device("cpu"))
+                    context_null = self.text_encoder([n_prompt], torch.device("cpu"))
+                    context = [t.to(self.device) for t in context]
+                    context_null = [t.to(self.device) for t in context_null]
+                # Cast to requested precision for downstream model
+                target_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
+                context = [
+                    t.to(dtype=target_dtype, device=self.device) for t in context
+                ]
+                context_null = [
+                    t.to(dtype=target_dtype, device=self.device) for t in context_null
+                ]
+            # Offload and break references immediately
+            try:
+                if hasattr(torch.cuda, "memory_summary") and torch.cuda.is_available():
+                    logging.info(
+                        "CUDA memory before T5 offload:\n"
+                        + torch.cuda.memory_summary(device=self.device)
+                    )
+            except Exception:
+                pass
+            if hasattr(self.text_encoder, "model"):
+                self.text_encoder.model.cpu()
+            self._text_encoder_offloaded = True
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                try:
+                    logging.info(
+                        "CUDA memory after T5 offload:\n"
+                        + torch.cuda.memory_summary(device=self.device)
+                    )
+                except Exception:
+                    pass
 
         noise = [
             torch.randn(
@@ -284,53 +392,54 @@ class WanT2V:
                 target_shape[3],
                 dtype=torch.float32,
                 device=self.device,
-                generator=seed_g)
+                generator=seed_g,
+            )
         ]
 
         @contextmanager
         def noop_no_sync():
             yield
 
-        no_sync_low_noise = getattr(self.low_noise_model, 'no_sync',
-                                    noop_no_sync)
-        no_sync_high_noise = getattr(self.high_noise_model, 'no_sync',
-                                     noop_no_sync)
+        no_sync_low_noise = getattr(self.low_noise_model, "no_sync", noop_no_sync)
+        no_sync_high_noise = getattr(self.high_noise_model, "no_sync", noop_no_sync)
 
         # evaluation mode
         with (
-                torch.amp.autocast('cuda', dtype=self.param_dtype),
-                torch.no_grad(),
-                no_sync_low_noise(),
-                no_sync_high_noise(),
+            torch.amp.autocast("cuda", dtype=self.param_dtype),
+            torch.no_grad(),
+            no_sync_low_noise(),
+            no_sync_high_noise(),
         ):
             boundary = self.boundary * self.num_train_timesteps
 
-            if sample_solver == 'unipc':
+            if sample_solver == "unipc":
                 sample_scheduler = FlowUniPCMultistepScheduler(
                     num_train_timesteps=self.num_train_timesteps,
                     shift=1,
-                    use_dynamic_shifting=False)
+                    use_dynamic_shifting=False,
+                )
                 sample_scheduler.set_timesteps(
-                    sampling_steps, device=self.device, shift=shift)
+                    sampling_steps, device=self.device, shift=shift
+                )
                 timesteps = sample_scheduler.timesteps
-            elif sample_solver == 'dpm++':
+            elif sample_solver == "dpm++":
                 sample_scheduler = FlowDPMSolverMultistepScheduler(
                     num_train_timesteps=self.num_train_timesteps,
                     shift=1,
-                    use_dynamic_shifting=False)
+                    use_dynamic_shifting=False,
+                )
                 sampling_sigmas = get_sampling_sigmas(sampling_steps, shift)
                 timesteps, _ = retrieve_timesteps(
-                    sample_scheduler,
-                    device=self.device,
-                    sigmas=sampling_sigmas)
+                    sample_scheduler, device=self.device, sigmas=sampling_sigmas
+                )
             else:
                 raise NotImplementedError("Unsupported solver.")
 
             # sample videos
             latents = noise
 
-            arg_c = {'context': context, 'seq_len': seq_len}
-            arg_null = {'context': context_null, 'seq_len': seq_len}
+            arg_c = {"context": context, "seq_len": seq_len}
+            arg_null = {"context": context_null, "seq_len": seq_len}
 
             for _, t in enumerate(tqdm(timesteps)):
                 latent_model_input = latents
@@ -338,25 +447,25 @@ class WanT2V:
 
                 timestep = torch.stack(timestep)
 
-                model = self._prepare_model_for_timestep(
-                    t, boundary, offload_model)
-                sample_guide_scale = guide_scale[1] if t.item(
-                ) >= boundary else guide_scale[0]
+                model = self._prepare_model_for_timestep(t, boundary, offload_model)
+                sample_guide_scale = (
+                    guide_scale[1] if t.item() >= boundary else guide_scale[0]
+                )
 
-                noise_pred_cond = model(
-                    latent_model_input, t=timestep, **arg_c)[0]
-                noise_pred_uncond = model(
-                    latent_model_input, t=timestep, **arg_null)[0]
+                noise_pred_cond = model(latent_model_input, t=timestep, **arg_c)[0]
+                noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0]
 
                 noise_pred = noise_pred_uncond + sample_guide_scale * (
-                    noise_pred_cond - noise_pred_uncond)
+                    noise_pred_cond - noise_pred_uncond
+                )
 
                 temp_x0 = sample_scheduler.step(
                     noise_pred.unsqueeze(0),
                     t,
                     latents[0].unsqueeze(0),
                     return_dict=False,
-                    generator=seed_g)[0]
+                    generator=seed_g,
+                )[0]
                 latents = [temp_x0.squeeze(0)]
 
             x0 = latents

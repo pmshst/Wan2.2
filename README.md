@@ -230,6 +230,52 @@ torchrun --nproc_per_node=8 generate.py --task ti2v-5B --size 1280*704 --ckpt_di
 
 
 
+#### Run Speech-to-Video Generation
+
+The repository also provides the `Wan2.2-S2V-14B` speech-to-video pipeline. It animates a reference portrait using either a driving audio clip or the integrated CosyVoice text-to-speech backend.
+
+- Speech-driven generation with an audio file
+
+```sh
+python generate.py \
+  --task s2v-14B \
+  --size 1280*720 \
+  --ckpt_dir ./Wan2.2-S2V-14B \
+  --image examples/pose.png \
+  --audio examples/talk.wav \
+  --pose_video examples/pose.mp4 \
+  --prompt "A charismatic presenter greeting the audience with confident gestures." \
+  --offload_model True --convert_model_dtype
+```
+
+> Optional flags:
+> - `--enable_tts` synthesises driving audio via CosyVoice when no `--audio` is provided. Pair it with `--tts_prompt_audio` (speaker reference) and `--tts_text` (target transcript).
+> - `--num_repeat` controls how many clips to render for long speeches. The default is chosen automatically from the audio length.
+
+Install the extra audio/TTS dependencies with `pip install -r requirements_s2v.txt` before running CosyVoice-based workflows.
+
+
+#### Run Character Animation Generation
+
+`Wan2.2-Animate-14B` produces pose-driven character animation. It expects a preprocessing folder containing the extracted pose (`src_pose.mp4`), facial reference (`src_face.mp4`), clean background (`src_bg.mp4`), masks (`src_mask.mp4`), and a reference key frame (`src_ref.png`). Example assets can be found under `examples/wan_animate/`.
+
+```sh
+python generate.py \
+  --task animate-14B \
+  --ckpt_dir ./Wan2.2-Animate-14B \
+  --animate_src_root examples/wan_animate/animate \
+  --prompt "视频中的人在做动作" \
+  --animate_refer_frames 5 \
+  --offload_model True --convert_model_dtype
+```
+
+> Useful options:
+> - `--animate_replace` enables background replacement when the preprocessing folder contains foreground/background sequences.
+> - `--animate_clip_len` adjusts the temporal window per inference chunk (default 77 frames).
+
+Dependencies for the preprocessing toolkit reside in `requirements_animate.txt` (including SAM2). Install them when you need to run the pose extraction pipeline.
+
+
 ## Computational Efficiency on Different GPUs
 
 We test the computational efficiency of different **Wan2.2** models on different GPUs in the following table. The results are presented in the format: **Total time (s) / peak GPU memory (GB)**.
@@ -312,4 +358,3 @@ We would like to thank the contributors to the [SD3](https://huggingface.co/stab
 
 ## Contact Us
 If you would like to leave a message to our research or product teams, feel free to join our [Discord](https://discord.gg/AKNgpMK4Yj) or [WeChat groups](https://gw.alicdn.com/imgextra/i2/O1CN01tqjWFi1ByuyehkTSB_!!6000000000015-0-tps-611-1279.jpg)!
-

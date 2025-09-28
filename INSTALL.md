@@ -5,6 +5,10 @@
 ```bash
 pip install .
 pip install .[dev]  # Installe aussi les outils de dev
+
+# Optional extras
+pip install -r requirements_s2v.txt      # Speech-to-video audio/TTS stack
+pip install -r requirements_animate.txt  # Animation preprocessing stack
 ```
 
 ## Install with Poetry
