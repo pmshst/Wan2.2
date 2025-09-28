@@ -63,9 +63,7 @@ We are excited to release the distilled version of <a href="https://wan.video"><
 ### Wan2.2-T2V-A14B-NFE4-V1.1 vs Wan2.2-T2V-A14B-NFE4-250928
 The videos below can be reproduced using [examples/i2v_prompt_list.txt](examples/motion_and_camera.txt) with seed 42.
 
-```HTML
 <video src="https://huggingface.co/lightx2v/Wan2.2-Lightning/blob/main/Wan2.2-T2V-A14B-4steps-lora-250928/v1.1-vs-250928.mp4" width="60%" controls loop></video>
-```
 
 ### Wan2.2-I2V-A14B-NFE4-V1 Demo
 
