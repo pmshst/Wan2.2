@@ -5,3 +5,5 @@ from .speech2video import WanS2V
 from .text2video import WanT2V
 from .text2videolocal import WanT2VLocal
 from .textimage2video import WanTI2V
+from .textimage2videolocal import WanTI2VLocal
+from .image2videolocal import WanI2VLocal

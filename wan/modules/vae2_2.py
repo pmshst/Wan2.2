@@ -6,6 +6,10 @@ import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+import safetensors.torch
+
+# from line_profiler import profile
+# from memory_profiler import profile
 
 __all__ = [
     "Wan2_2_VAE",
@@ -211,7 +215,7 @@ class ResidualBlock(nn.Module):
             CausalConv3d(in_dim, out_dim, 1)
             if in_dim != out_dim else nn.Identity())
 
-    def forward(self, x, feat_cache=None, feat_idx=[0]):
+    def forward(self, x, feat_cache=None, feat_idx=[0]):  # original 630.466 s
         h = self.shortcut(x)
         for layer in self.residual:
             if isinstance(layer, CausalConv3d) and feat_cache is not None:
@@ -229,6 +233,24 @@ class ResidualBlock(nn.Module):
                     )
                 x = layer(x, feat_cache[idx])
                 feat_cache[idx] = cache_x
+                feat_idx[0] += 1
+            else:
+                x = layer(x)
+        return x + h
+
+    def forward_(self, x, feat_cache=None, feat_idx=None):  # less mem, bad quality 498.593 s
+        h = self.shortcut(x)
+        for layer in self.residual:
+            if isinstance(layer, CausalConv3d) and feat_cache is not None:
+                idx = feat_idx[0]
+                cache_x = x[:, :, -CACHE_T:, :, :].clone().detach()
+                if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
+                    cache_x = torch.cat([
+                        feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device),
+                        cache_x
+                    ], dim=2)
+                x = layer(x, cache_x)
+                feat_cache[idx] = None  # Clear cache
                 feat_idx[0] += 1
             else:
                 x = layer(x)
@@ -754,16 +776,16 @@ class WanVAE_(nn.Module):
         self.temperal_upsample = temperal_downsample[::-1]
 
         # modules
-        self.encoder = Encoder3d(
-            dim,
-            z_dim * 2,
-            dim_mult,
-            num_res_blocks,
-            attn_scales,
-            self.temperal_downsample,
-            dropout,
-        )
-        self.conv1 = CausalConv3d(z_dim * 2, z_dim * 2, 1)
+        #self.encoder = Encoder3d(
+        #    dim,
+        #    z_dim * 2,
+        #    dim_mult,
+        #    num_res_blocks,
+        #    attn_scales,
+        #    self.temperal_downsample,
+        #    dropout,
+        #)
+        #self.conv1 = CausalConv3d(z_dim * 2, z_dim * 2, 1)
         self.conv2 = CausalConv3d(z_dim, z_dim, 1)
         self.decoder = Decoder3d(
             dec_dim,
@@ -855,9 +877,9 @@ class WanVAE_(nn.Module):
         self._conv_idx = [0]
         self._feat_map = [None] * self._conv_num
         # cache encode
-        self._enc_conv_num = count_conv3d(self.encoder)
-        self._enc_conv_idx = [0]
-        self._enc_feat_map = [None] * self._enc_conv_num
+        #self._enc_conv_num = count_conv3d(self.encoder)
+        #self._enc_conv_idx = [0]
+        #self._enc_feat_map = [None] * self._enc_conv_num
 
 
 def _video_vae(pretrained_path=None, z_dim=16, dim=160, device="cpu", **kwargs):
@@ -876,11 +898,15 @@ def _video_vae(pretrained_path=None, z_dim=16, dim=160, device="cpu", **kwargs):
     # init model
     with torch.device("meta"):
         model = WanVAE_(**cfg)
+    model.to_empty(device="cpu")
 
+    # use bfp16
+    pretrained_path = "./Wan2.2-TI2V-5B/Wan2.2_VAE.safetensors"
     # load checkpoint
     logging.info(f"loading {pretrained_path}")
-    model.load_state_dict(
-        torch.load(pretrained_path, map_location=device), assign=True)
+    part_state_dict = safetensors.torch.load_file(pretrained_path, device="cpu")
+    model.load_state_dict(part_state_dict, strict=False)
+    #model.load_state_dict(torch.load(pretrained_path, map_location=device), assign=True, strict=False)
 
     return model
 
@@ -1019,7 +1045,7 @@ class Wan2_2_VAE:
                 dim=c_dim,
                 dim_mult=dim_mult,
                 temperal_downsample=temperal_downsample,
-            ).eval().requires_grad_(False).to(device))
+            ).eval().requires_grad_(False)) #.to(device))
 
     def encode(self, videos):
         try:
