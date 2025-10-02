@@ -1,7 +1,4 @@
 # split safetensors files by modules (run after convert_safetensors.py)
-
-# --- Configuration ---
-MODEL_DIR = "./high_noise_model" # The folder with the 6 safetensors files
 import json
 import os
 import safetensors.torch

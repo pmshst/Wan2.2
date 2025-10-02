@@ -369,7 +369,7 @@ def generate(args):
             offload_model=args.offload_model)
     elif "ti2v" in args.task:
         logging.info("Creating WanTI2V pipeline.")
-        wan_ti2v = wan.WanTI2V(
+        wan_ti2v = wan.WanTI2VLocal(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
             device_id=device,
@@ -427,7 +427,7 @@ def generate(args):
 
     else:
         logging.info("Creating WanI2V pipeline.")
-        wan_i2v = wan.WanI2V(
+        wan_i2v = wan.WanI2VLocal(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
             device_id=device,

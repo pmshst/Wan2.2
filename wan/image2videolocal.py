@@ -1,4 +1,5 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+import gc
 import logging
 import math
 import os
@@ -11,10 +12,12 @@ from contextlib import contextmanager
 from functools import partial
 import gc
 
-from torch.cuda.amp import autocast
-
+import numpy as np
 import torch
+from torch.cuda.amp import autocast
+import torch.cuda.amp as amp
 import torch.distributed as dist
+import torchvision.transforms.functional as TF
 from tqdm import tqdm
 
 from .distributed.fsdp import shard_model
@@ -112,7 +115,7 @@ def get_free_ram(human_readable=False):
         return available_bytes
 
 
-class WanT2VLocal:
+class WanI2VLocal:
 
     def __init__(
         self,
@@ -128,7 +131,7 @@ class WanT2VLocal:
         convert_model_dtype=False,
     ):
         r"""
-        Initializes the Wan text-to-video generation model components.
+        Initializes the image-to-video generation model components.
 
         Args:
             config (EasyDict):
@@ -270,32 +273,37 @@ class WanT2VLocal:
                 getattr(self, required_model_name).to(self.device)
         return getattr(self, required_model_name)
 
+
     def generate(self,
                  input_prompt,
-                 size=(1280, 720),
+                 img,
+                 max_area=720 * 1280,
                  frame_num=81,
                  shift=5.0,
                  sample_solver='unipc',
-                 sampling_steps=50,
+                 sampling_steps=40,
                  guide_scale=5.0,
                  n_prompt="",
                  seed=-1,
                  offload_model=True):
         r"""
-        Generates video frames from text prompt using diffusion process.
+        Generates video frames from input image and text prompt using diffusion process.
 
         Args:
             input_prompt (`str`):
-                Text prompt for content generation
-            size (`tuple[int]`, *optional*, defaults to (1280,720)):
-                Controls video resolution, (width,height).
+                Text prompt for content generation.
+            img (PIL.Image.Image):
+                Input image tensor. Shape: [3, H, W]
+            max_area (`int`, *optional*, defaults to 720*1280):
+                Maximum pixel area for latent space calculation. Controls video resolution scaling
             frame_num (`int`, *optional*, defaults to 81):
                 How many frames to sample from a video. The number should be 4n+1
             shift (`float`, *optional*, defaults to 5.0):
                 Noise schedule shift parameter. Affects temporal dynamics
+                [NOTE]: If you want to generate a 480p video, it is recommended to set the shift value to 3.0.
             sample_solver (`str`, *optional*, defaults to 'unipc'):
                 Solver used to sample the video.
-            sampling_steps (`int`, *optional*, defaults to 50):
+            sampling_steps (`int`, *optional*, defaults to 40):
                 Number of diffusion sampling steps. Higher values improve quality but slow generation
             guide_scale (`float` or tuple[`float`], *optional*, defaults 5.0):
                 Classifier-free guidance scale. Controls prompt adherence vs. creativity.
@@ -304,7 +312,7 @@ class WanT2VLocal:
             n_prompt (`str`, *optional*, defaults to ""):
                 Negative prompt for content exclusion. If not given, use `config.sample_neg_prompt`
             seed (`int`, *optional*, defaults to -1):
-                Random seed for noise generation. If -1, use random seed.
+                Random seed for noise generation. If -1, use random seed
             offload_model (`bool`, *optional*, defaults to True):
                 If True, offloads models to CPU during generation to save VRAM
 
@@ -313,62 +321,91 @@ class WanT2VLocal:
                 Generated video frames tensor. Dimensions: (C, N H, W) where:
                 - C: Color channels (3 for RGB)
                 - N: Number of frames (81)
-                - H: Frame height (from size)
-                - W: Frame width from size)
+                - H: Frame height (from max_area)
+                - W: Frame width from max_area)
         """
         # preprocess
         guide_scale = (guide_scale, guide_scale) if isinstance(
             guide_scale, float) else guide_scale
+        img = TF.to_tensor(img).sub_(0.5).div_(0.5).to(self.device, dtype=torch.bfloat16)
 
-        # size 1280*720
-        # 13 frames 5.5Gb 52.13s/it 4.01s/it/frame    (50.02s/it +3 blocks on vram 7.3Gb)
-        # 17 frames 6.6Gb 65.80s/it 3.87s/it/frame
-        # 21 frames 7.7Gb 79.50s/it 3.78s/it/frame    vae decode 345 sec
         frame_num = 21
-        sampling_steps = 16  # 16+ best
+        sampling_steps = 16  # 16+ best (high res 1280*720), 25+ (low res 640*360)
+        # max_area = 720 * 1280 default
 
+        # size 640*360
+        # 33 frames 24.72 s/it
 
-        # size = (832, 480)
+        # size 640*480, sampling_steps 25+
+        # 17 frames 7.4Gb 23.21s/it 1.36s/it/frame    vae 7.66917 s
+        # 73 frames 7.7Gb 100s/it   1.36s/it/frame    vae 19.6426 s
 
-        # size 400*224
-        # size = (400, 224)
-        # frame_num = 250  # 1997.31 sec vae decode 15 sec
+        # 704 * 396, sampling_steps 25+
+        # frame_num = 49        24.72 s/it
+        # frame_num = 81 (best) 77.50 s/it              vae decode 14.4 sec
 
-        # size 640*480
-        # 73 frames 7.7Gb 100s/it   1.36s/it/frame    vae 19.6426 s !!! vae fit on vram 8Gb !!!
-        # 17 frames 7.4Gb 23.21s/it 1.36s/it/frame    vae 7.66917 s !!! vae fit on vram 8Gb !!!
-        # size = (640, 480)
+        # size 720*405, sampling_steps 20+
+        # frame_num = 17        21.23 s/it
+        # frame_num = 77 (max)  82.11 s/it             vae decode 14.4 sec
+        # frame_num = 81        100.05 s/it (0.2Gb shared mem)
 
-        # size 720*576
-        # 49 frames 7.2Gb 80.12s/it 1.63s/it/frame
-        # 13 frames                                   VAE decode: 27.35 sec
-        # size = (720, 576)
+        # size 832*468 / 848*448, sampling_steps 20+
+        # frame_num = 17 27.18s/it
+        # frame_num = 53 74.34s/it                     vae decode 53 sec
 
-        # size 1600*896
-        # 13 frames 7.5Gb 85.47s/it 6.57s/it/frame
-        # size = (1600, 896)
+        ######################################################
+        # for 8gb vram and sizes > 832*468 vae use slow shared video memory
 
-        self.without_neg_prompt = False  # 2x faster, poor quality
+        # size 960*540, sampling_steps 16+
+        # 17 frames         34.30 s/it
+        # 41 frames (max)   75.02 s/it
+
+        # size 1280*720, sampling_steps 16+
+        # 13 frames         50.02s/it  4.01s/it/frame
+        # 17 frames         65.80s/it  3.87s/it/frame
+        # 21 frames (max)   79.50s/it  3.78s/it/frame    vae decode 345 sec
+        # 25 frames (7.9Gb) 88.83s/it  3.55s/it/frame    vae decode 407 sec
+
+        # size 1600*896, sampling_steps 15+
+        # 13 frames (max) 85.47s/it    6.57s/it/frame
+
+        self.without_neg_prompt = False  # 2x faster, poor objects consistency
+        self.infinity_loop = True  # for generating long videos (continued from the last frame)
 
         F = frame_num
+        h, w = img.shape[1:]
+        aspect_ratio = h / w
+        lat_h = round(
+            np.sqrt(max_area * aspect_ratio) // self.vae_stride[1] //
+            self.patch_size[1] * self.patch_size[1])
+        lat_w = round(
+            np.sqrt(max_area / aspect_ratio) // self.vae_stride[2] //
+            self.patch_size[2] * self.patch_size[2])
+        h = lat_h * self.vae_stride[1]
+        w = lat_w * self.vae_stride[2]
 
-        print(f"Generating {frame_num} frames")
+        print(f"Generating {frame_num} frames {w}*{h}")
 
-        target_shape = (16,  #self.vae.model.z_dim,
-                        (F - 1) // self.vae_stride[0] + 1,
-                        size[1] // self.vae_stride[1],
-                        size[0] // self.vae_stride[2])
 
-        seq_len = math.ceil((target_shape[2] * target_shape[3]) /
-                            (self.patch_size[1] * self.patch_size[2]) *
-                            target_shape[1] / self.sp_size) * self.sp_size
+        max_seq_len = ((F - 1) // self.vae_stride[0] + 1) * lat_h * lat_w // (
+            self.patch_size[1] * self.patch_size[2])
+        max_seq_len = int(math.ceil(max_seq_len / self.sp_size)) * self.sp_size
 
-        if n_prompt == "":
-            n_prompt = self.sample_neg_prompt
         seed = seed if seed >= 0 else random.randint(0, sys.maxsize)
         seed_g = torch.Generator(device=self.device)
         seed_g.manual_seed(seed)
 
+        msk = torch.ones(1, F, lat_h, lat_w, device=self.device, dtype=torch.bfloat16)
+        msk[:, 1:] = 0
+        msk = torch.concat([
+            torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]
+        ],
+                           dim=1)
+        msk = msk.view(1, msk.shape[1] // 4, 4, lat_h, lat_w)
+        msk = msk.transpose(1, 2)[0]
+
+        if n_prompt == "":
+            n_prompt = self.sample_neg_prompt
 
         print(f"Loading model T5EncoderModel")
         latent_file_path = "./final_latents.pt"
@@ -419,30 +456,74 @@ class WanT2VLocal:
             print(f"Creating noise")
             start_inference = time.time_ns()
 
-            noise = [
-                torch.randn(
-                    target_shape[0],
-                    target_shape[1],
-                    target_shape[2],
-                    target_shape[3],
-                    dtype=torch.float32,
-                    device=self.device,
-                    generator=seed_g)
-            ]
+            noise = torch.randn(
+                16,
+                (F - 1) // self.vae_stride[0] + 1,
+                lat_h,
+                lat_w,
+                dtype=torch.bfloat16,
+                generator=seed_g,
+                device=self.device)
 
-            @contextmanager
-            def noop_no_sync():
-                yield
+            last_frame_latent = "./last_frame_latents.pt"
+            if os.path.exists(last_frame_latent):
+                self.vae = Wan2_1_VAE(
+                    vae_pth=os.path.join(self.checkpoint_dir, self.config.vae_checkpoint),
+                    device=self.device,
+                    dtype=torch.bfloat16)
+                print(f"Found last frame continue video: {last_frame_latent}")
+                lf = torch.load(last_frame_latent)
+                last_frame_for_interp = lf.unsqueeze(0).to(self.device)
+                resized_frame = torch.nn.functional.interpolate(
+                    last_frame_for_interp, size=(h, w), mode='bicubic', align_corners=False
+                )
+                first_frame_prepared = resized_frame.squeeze(0).unsqueeze(1)
+                zero_padding = torch.zeros(
+                    3, F - 1, h, w,
+                    device=self.device,
+                    dtype=first_frame_prepared.dtype
+                )
+                prepared_video_tensor = torch.cat([first_frame_prepared, zero_padding], dim=1)
+
+                new_y = self.vae.encode([prepared_video_tensor])[0]
+                torch.save(new_y.to(dtype=torch.bfloat16), "./y_latents.pt")
+                os.remove("./last_frame_latents.pt")
+                print("y_latents prepared, run again to start inference")
+                exit()
+
+            y_latent = "./y_latents.pt"
+            if os.path.exists(y_latent):
+                print("--- STAGE 1.1: Found pre-computed \"y\" latents. Loading. ---")
+                print(f"Loading latents from: {y_latent}")
+                y = torch.load(y_latent)
+            else:
+                self.vae = Wan2_1_VAE(
+                    vae_pth=os.path.join(self.checkpoint_dir, self.config.vae_checkpoint),
+                    device=self.device,
+                    dtype=torch.bfloat16)
+                y = self.vae.encode([
+                    torch.concat([
+                        torch.nn.functional.interpolate(
+                            img[None].cpu(), size=(h, w), mode='bicubic').transpose(
+                            0, 1),
+                        torch.zeros(3, F - 1, h, w)
+                    ],
+                        dim=1).to(self.device)
+                ])[0]
+                torch.save(y, "./y_latents.pt")
+                print("y_latents prepared, run again to start inference")
+                exit()
+
+            y = torch.concat([msk, y])
+
+            self.vae = None
+            gc.collect()
+            torch.cuda.empty_cache()
 
             print(f"Creating sample_scheduler")
             # evaluation mode
-            with (
-                    torch.amp.autocast('cuda', dtype=self.param_dtype),
-                    torch.no_grad(),
-            ):
+            with (torch.no_grad()):
                 boundary = self.boundary * self.num_train_timesteps
-
-                sample_solver = 'dpm++'
 
                 if sample_solver == 'unipc':
                     sample_scheduler = FlowUniPCMultistepScheduler(
@@ -467,22 +548,25 @@ class WanT2VLocal:
 
                 print(f"sample videos")
                 # sample videos
-                latents = noise
+                latent = noise
 
                 block_mem = 780000000
                 blocks_in_ram = int(get_free_ram() / block_mem)
-
                 free_memory, total_memory = torch.cuda.mem_get_info()
-                blocks_in_vram = 0
-                if size == (1280, 720):  # 0.0000011
-                    mem_need = frame_num / 4 * 1.05 + 2.2
-                    blocks_in_vram = int(((total_memory - mem_need * 1024 * 1024 * 1024)) / block_mem)
-                if size == (640, 480):   # 0.00000075
-                    mem_need = frame_num / 4 * 0.3 + 2.2
-                    blocks_in_vram = int(((total_memory - mem_need * 1024 * 1024 * 1024)) / block_mem)
-                if size == (720, 576):   # 0.00000075
-                    mem_need = frame_num / 4 * 0.28 + 2.2
-                    blocks_in_vram = int(((total_memory - mem_need * 1024 * 1024 * 1024)) / block_mem)
+
+                k = 0.0000001
+                d = 1.2
+                if w > 700 or h > 700:
+                    d = 2.4
+                if w > 800 or h > 800:
+                    d = 3.5
+                if w > 900 or h > 900:
+                    d = 4.6
+                if w > 1300 or h > 1300:
+                    d = 5.2
+                mem_need = max_area * k * frame_num + d + frame_num * 0.035
+                blocks_in_vram =  int(((total_memory - mem_need * 1024 * 1024 * 1024)) / block_mem)
+
                 torch.backends.cudnn.benchmark = True
 
                 if blocks_in_ram > 40 - blocks_in_vram:
@@ -495,9 +579,9 @@ class WanT2VLocal:
                 model = None
                 for _, t in enumerate(tqdm(timesteps)):
                     print(f"\nTimestep: {t}")
-                    latent_model_input = latents
+                    latent_model_input = [latent.to(self.device)]
                     timestep = [t]
-                    timestep = torch.stack(timestep)
+                    timestep = torch.stack(timestep).to(self.device)
 
                     if t.item() >= boundary:
                         # high
@@ -507,7 +591,7 @@ class WanT2VLocal:
                                 self.high_noise_model = WanModel.from_pretrained(
                                     self.checkpoint_dir,
                                     subfolder=self.config.high_noise_checkpoint,
-                                    model_type='t2v_h', blocks_in_ram=blocks_in_ram,
+                                    model_type='i2v_h', blocks_in_ram=blocks_in_ram,
                                     blocks_in_vram=blocks_in_vram
                                 )
                                 self.high_noise_model = self._configure_model(
@@ -534,7 +618,7 @@ class WanT2VLocal:
                                 self.low_noise_model = WanModel.from_pretrained(
                                     self.checkpoint_dir,
                                     subfolder=self.config.low_noise_checkpoint,
-                                    model_type='t2v_l', blocks_in_ram=blocks_in_ram,
+                                    model_type='i2v_l', blocks_in_ram=blocks_in_ram,
                                     blocks_in_vram=blocks_in_vram
                                 )
                                 self.low_noise_model = self._configure_model(
@@ -551,9 +635,10 @@ class WanT2VLocal:
                     noise_pred_cond, noise_pred_uncond = model(
                         x=latent_model_input,
                         t=timestep,
-                        context=context,
+                        context=[context[0]],
                         context_null=context_null,
-                        seq_len=seq_len
+                        seq_len=max_seq_len,
+                        y=[y]
                     )
                     if self.without_neg_prompt:
                         noise_pred = noise_pred_cond[0]
@@ -566,26 +651,26 @@ class WanT2VLocal:
                     temp_x0 = sample_scheduler.step(
                         noise_pred.unsqueeze(0),
                         t,
-                        latents[0].unsqueeze(0),
+                        latent.unsqueeze(0),
                         return_dict=False,
                         generator=seed_g)[0]
-                    latents = [temp_x0.squeeze(0)]
+                    latent = temp_x0.squeeze(0)
 
                 print("Denoising complete. Offloading main models...")
                 self.low_noise_model.clear_mem()
-                del self.low_noise_model, model
+                del self.low_noise_model, model, sample_scheduler, noise
                 self.low_noise_model = None
                 gc.collect()
                 torch.cuda.empty_cache()
 
-                x0 = latents
+                x0 = [latent]
                 del latent_model_input, timestep
                 end_inference = time.time_ns()
                 print(f"Inference time: {(end_inference - start_inference) / 1000000000} sec")
 
                 print(f"Saving final latents to: {latent_file_path}")
                 torch.save(x0, latent_file_path)
-
+                exit()
         else:
             if os.path.exists(latent_file_path):
                 print("--- STAGE 2: Found pre-computed latents. Decoding with VAE. ---")
@@ -609,12 +694,13 @@ class WanT2VLocal:
             gc.collect()
             torch.cuda.empty_cache()
 
+            y = videos[0][:, -1, :, :]
+            torch.save(y, "./last_frame_latents.pt")
+
+            if self.infinity_loop:
+                os.remove(latent_file_path)
+
             return videos[0] if self.rank == 0 else None
 
-# test prompt
-# kernprof -l -v generate_local.py --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
-# kernprof -l -v generate_local.py --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "A breathtaking high-speed chase through a neon-lit cyberpunk city at night. A sleek, futuristic motorcycle with glowing blue accents weaves through flying vehicles and holographic advertisements. The rider, clad in reflective black gear, leans into sharp turns while evading pursuit. Dynamic camera angles follow from above, below, and alongside, capturing the intense motion blur of city lights. Rain-slicked streets create colorful reflections as the motorcycle jumps between elevated highways. Explosions detonate in the background, illuminating the scene with orange bursts. Slow-motion shots capture water droplets and debris frozen in air before returning to blistering speed. The scene culminates in a daring leap across a massive gap between skyscrapers, with the cityscape sprawling below. Cinematic lighting, dramatic shadows, and particle effects enhance the adrenaline-fueled sequence."
-# kernprof -l -v generate_local.py --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "Cinematic cyberpunk rainforest at twilight - Bioluminescent neon vines wrapping around ancient trees, holographic wildlife flickering between digital raindrops, slow-motion drone shot ascending through misty canopy layers. Style - Hyperrealistic Unreal Engine 5 render, neon-noir color palette, electric cyan deep magenta, volumetric lighting, ethereal synthwave soundtrack."
-# kernprof -l -v generate_local.py --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "Telephoto lens. A tiger walking through the jungle. The camera follows the tiger smoothly, keeping it in the center of the frame as the muscles ripple slowly beneath its striped fur. The tiger's eyes are focused intently ahead, and its steps are steady and powerful. The background is dense green vegetation and trees, with sunlight filtering through the leaves to cast mottled light and shadows."
-
-
+# kernprof -l -v generate_local.py --task i2v-A14B --size "1280*720" --image=./last_frame.png --ckpt_dir ./Wan2.2-I2V-A14B --prompt "Telephoto lens. A tiger walking through the jungle. The camera follows the tiger smoothly, keeping it in the center of the frame as the muscles ripple slowly beneath its striped fur. The tiger's eyes are focused intently ahead, and its steps are steady and powerful. The background is dense green vegetation and trees, with sunlight filtering through the leaves to cast mottled light and shadows."
+# kernprof -l -v generate_local.py --task i2v-A14B --size "1280*720" --image=./last_frame.png --ckpt_dir ./Wan2.2-I2V-A14B --prompt "In close-up, a cheetah runs at full speed in a narrow canyon, its golden fur gleaming in the sun, and its black tear marks clearly visible. Shot from a low angle, the cheetah's body is close to the ground, its muscles flowing, and its limbs alternately and powerfully step over stones and soil, stirring up dust. The cheetah's eyes are sharp, staring at the target in front of it, showing unparalleled speed and strength. The camera follows the cheetah's running trajectory, capturing every moment of leaping and turning, showing its amazing agility. The whole scene unfolds in a tense chase rhythm, full of wild charm and competition for survival."
