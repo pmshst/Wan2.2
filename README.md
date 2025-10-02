@@ -24,28 +24,6 @@
 
 Wan2.2 on 8GB VRAM: Run Advanced AI Video Generation Locally! (Optimization Guide) https://youtu.be/LlqnghCNxXM
 
------
-
-[**Wan: Open and Advanced Large-Scale Video Generative Models**](https://arxiv.org/abs/2503.20314) <be>
-
-
-We are excited to introduce **Wan2.2**, a major upgrade to our foundational video models. With **Wan2.2**, we have focused on incorporating the following innovations:
-
-- 👍 **Effective MoE Architecture**: Wan2.2 introduces a Mixture-of-Experts (MoE) architecture into video diffusion models. By separating the denoising process cross timesteps with specialized powerful expert models, this enlarges the overall model capacity while maintaining the same computational cost.
-
-- 👍 **Cinematic-level Aesthetics**: Wan2.2 incorporates meticulously curated aesthetic data, complete with detailed labels for lighting, composition, contrast, color tone, and more. This allows for more precise and controllable cinematic style generation, facilitating the creation of videos with customizable aesthetic preferences.
-
-- 👍 **Complex Motion Generation**: Compared to Wan2.1, Wan2.2 is trained on a significantly larger data, with +65.6% more images and +83.2% more videos. This expansion notably enhances the model's generalization across multiple dimensions such as motions,  semantics, and aesthetics, achieving TOP performance among all open-sourced and closed-sourced models. 
-
-- 👍 **Efficient High-Definition Hybrid TI2V**:  Wan2.2 open-sources a 5B model built with our advanced Wan2.2-VAE that achieves a compression ratio of **16×16×4**. This model supports both text-to-video and image-to-video generation at 720P resolution with 24fps and can also run on consumer-grade graphics cards like 4090. It is one of the fastest **720P@24fps** models currently available, capable of serving both the industrial and academic sectors simultaneously.
-
-
-## Video Demos
-
-<div align="center">
-  <video src="https://github.com/user-attachments/assets/b63bfa58-d5d7-4de6-a1a2-98970b06d9a7" width="70%" poster=""> </video>
-</div>
-
 ## UPDATE 10/02/2025
 - **Optimized I2V-A14B** run long video generation loop with **loop.bat**
 
@@ -55,7 +33,7 @@ We are excited to introduce **Wan2.2**, a major upgrade to our foundational vide
 - or edit prompt in **loop.bat** and run (command runs in loop, each iteration do one spep: create latent from image -> y_latents.pt, run inference -> final_latents.pt, decode video final_latents.pt -> last_frame_latents.pt, create latent from last frame last_frame_latents.pt -> y_latents.pt, run inference ...)
 - **to start new generation loop** with new image / prompt / frame count / size - delete: **y_latents.pt**, **final_latents.pt**, **last_frame_latents.pt**
 
-## Resulst on 3070 Ti laptop GPU 8gb
+## Resulst on 3070 Ti laptop GPU 8gb vram + 25gb free ram (some layers loading from NVME drive, to fit all in ram need 30Gb free ram)
         # size 640*360
         # 33 frames 24.72 s/it
 
@@ -100,6 +78,30 @@ We are excited to introduce **Wan2.2**, a major upgrade to our foundational vide
     1280*720 17 frames * 20 steps 1180 sec         61.6 s/it * 20 = 1232 sec    1.04x slower
 
 Visualy hard to notice diference in quality between fp8 and bfp16..
+
+
+-----
+
+[**Wan: Open and Advanced Large-Scale Video Generative Models**](https://arxiv.org/abs/2503.20314) <be>
+
+
+We are excited to introduce **Wan2.2**, a major upgrade to our foundational video models. With **Wan2.2**, we have focused on incorporating the following innovations:
+
+- 👍 **Effective MoE Architecture**: Wan2.2 introduces a Mixture-of-Experts (MoE) architecture into video diffusion models. By separating the denoising process cross timesteps with specialized powerful expert models, this enlarges the overall model capacity while maintaining the same computational cost.
+
+- 👍 **Cinematic-level Aesthetics**: Wan2.2 incorporates meticulously curated aesthetic data, complete with detailed labels for lighting, composition, contrast, color tone, and more. This allows for more precise and controllable cinematic style generation, facilitating the creation of videos with customizable aesthetic preferences.
+
+- 👍 **Complex Motion Generation**: Compared to Wan2.1, Wan2.2 is trained on a significantly larger data, with +65.6% more images and +83.2% more videos. This expansion notably enhances the model's generalization across multiple dimensions such as motions,  semantics, and aesthetics, achieving TOP performance among all open-sourced and closed-sourced models. 
+
+- 👍 **Efficient High-Definition Hybrid TI2V**:  Wan2.2 open-sources a 5B model built with our advanced Wan2.2-VAE that achieves a compression ratio of **16×16×4**. This model supports both text-to-video and image-to-video generation at 720P resolution with 24fps and can also run on consumer-grade graphics cards like 4090. It is one of the fastest **720P@24fps** models currently available, capable of serving both the industrial and academic sectors simultaneously.
+
+
+## Video Demos
+
+<div align="center">
+  <video src="https://github.com/user-attachments/assets/b63bfa58-d5d7-4de6-a1a2-98970b06d9a7" width="70%" poster=""> </video>
+</div>
+
 
 ## 🔥 Latest News!!
 
