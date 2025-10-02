@@ -46,6 +46,61 @@ We are excited to introduce **Wan2.2**, a major upgrade to our foundational vide
   <video src="https://github.com/user-attachments/assets/b63bfa58-d5d7-4de6-a1a2-98970b06d9a7" width="70%" poster=""> </video>
 </div>
 
+## UPDATE 10/02/2025
+- **Optimized I2V-A14B** run long video generation loop with **loop.bat**
+
+## How it works
+- setup same as T2V model: huggingface-cli download Wan-AI/Wan2.2-I2V-A14B --local-dir ./Wan2.2-I2V-A14B, than run convert and optimize scripts.
+- run file image2videolocal.py, example: **python generate_local.py --task i2v-A14B --size "1280*720" --image=./last_frame.png --ckpt_dir ./Wan2.2-I2V-A14B --prompt "In close-up, a cheetah runs at full speed in a narrow canyon, its golden fur gleaming in the sun, and its black tear marks clearly visible. Shot from a low angle, the cheetah's body is close to the ground, its muscles flowing, and its limbs alternately and powerfully step over stones and soil, stirring up dust. The cheetah's eyes are sharp, staring at the target in front of it, showing unparalleled speed and strength. The camera follows the cheetah's running trajectory, capturing every moment of leaping and turning, showing its amazing agility. The whole scene unfolds in a tense chase rhythm, full of wild charm and competition for survival."**
+- or edit prompt in **loop.bat** and run (command runs in loop, each iteration do one spep: create latent from image -> y_latents.pt, run inference -> final_latents.pt, decode video final_latents.pt -> last_frame_latents.pt, create latent from last frame last_frame_latents.pt -> y_latents.pt, run inference ...)
+- **to start new generation loop** with new image / prompt / frame count / size - delete: **y_latents.pt**, **final_latents.pt**, **last_frame_latents.pt**
+
+## Resulst on 3070 Ti laptop GPU 8gb
+        # size 640*360
+        # 33 frames 24.72 s/it
+
+        # size 640*480, sampling_steps 25+
+        # 17 frames 7.4Gb 23.21s/it 1.36s/it/frame    vae 7.66917 s
+        # 73 frames 7.7Gb 100s/it   1.36s/it/frame    vae 19.6426 s
+
+        # 704 * 396, sampling_steps 25+
+        # frame_num = 49        24.72 s/it
+        # frame_num = 81 (best) 77.50 s/it              vae decode 14.4 sec
+
+        # size 720*405, sampling_steps 20+
+        # frame_num = 17        21.23 s/it
+        # frame_num = 77 (max)  82.11 s/it             vae decode 14.4 sec
+        # frame_num = 81        100.05 s/it (0.2Gb shared mem)
+
+        # size 832*468 / 848*448, sampling_steps 20+
+        # frame_num = 17 27.18s/it
+        # frame_num = 53 74.34s/it                     vae decode 53 sec
+
+        ######################################################
+        # for 8gb vram and sizes > 832*468 vae use slow shared video memory
+
+        # size 960*540, sampling_steps 16+
+        # 17 frames         34.30 s/it
+        # 41 frames (max)   75.02 s/it
+
+        # size 1280*720, sampling_steps 16+
+        # 13 frames         50.02s/it  4.01s/it/frame
+        # 17 frames         65.80s/it  3.87s/it/frame
+        # 21 frames (max)   79.50s/it  3.78s/it/frame    vae decode 345 sec
+        # 25 frames (7.9Gb) 88.83s/it  3.55s/it/frame    vae decode 407 sec
+
+        # size 1600*896, sampling_steps 15+
+        # 13 frames (max) 85.47s/it    6.57s/it/frame
+
+# Compared to ComfyUA
+             ComfyUA (fp8)                         This (bfp16)
+    224*416  17 frames * 20 steps 144  sec         13.5 s/it * 20 = 270  sec    1.87x slower
+    512*288  17 frames * 20 steps 220  sec         15.4 s/it * 20 = 308  sec    1.4x  slower
+    720*400  17 frames * 20 steps 337  sec         21.6 s/it * 20 = 432  sec    1.28x slower
+    1280*720 17 frames * 20 steps 1180 sec         61.6 s/it * 20 = 1232 sec    1.04x slower
+
+Visualy hard to notice diference in quality between fp8 and bfp16..
+
 ## 🔥 Latest News!!
 
 * Aug 26, 2025: 🎵 We introduce **[Wan2.2-S2V-14B](https://humanaigc.github.io/wan-s2v-webpage)**, an audio-driven cinematic video generation model, including [inference code](#run-speech-to-video-generation), [model weights](#model-download), and [technical report](https://humanaigc.github.io/wan-s2v-webpage/content/wan-s2v.pdf)! Now you can try it on [wan.video](https://wan.video/),  [ModelScope Gradio](https://www.modelscope.cn/studios/Wan-AI/Wan2.2-S2V) or [HuggingFace Gradio](https://huggingface.co/spaces/Wan-AI/Wan2.2-S2V)!
