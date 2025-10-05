@@ -77,6 +77,11 @@ Wan2.2 on 8GB VRAM: Run Advanced AI Video Generation Locally! (Optimization Guid
     720*400  17 frames * 20 steps 337  sec         21.6 s/it * 20 = 432  sec    1.28x slower
     1280*720 17 frames * 20 steps 1180 sec         61.6 s/it * 20 = 1232 sec    1.04x slower
 
+              ComfyUA (fp8)                        This (fp16) coming soon optimized vae
+    1120*630 33 frames * 16 steps 1470 sec         89.43s/it * 16 = 1430 sec 
+    vae decode                    +117 sec                           +58 sec    
+    total                         1587 sec                          1488 sec    1.06x faster 
+
 Visualy hard to notice diference in quality between fp8 and bfp16..
 
 
