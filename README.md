@@ -27,6 +27,10 @@ Wan2.2 on 8GB VRAM: Run Advanced AI Video Generation Locally! (Optimization Guid
 ## UPDATE 10/02/2025
 - **Optimized I2V-A14B** run long video generation loop with **loop.bat**
 
+https://github.com/user-attachments/assets/154df173-88d3-4ad1-b543-f7410380b13a
+
+
+
 ## How it works
 - setup same as T2V model: huggingface-cli download Wan-AI/Wan2.2-I2V-A14B --local-dir ./Wan2.2-I2V-A14B, than run convert and optimize scripts.
 - run file image2videolocal.py, example: **python generate_local.py --task i2v-A14B --size "1280*720" --image=./last_frame.png --ckpt_dir ./Wan2.2-I2V-A14B --prompt "In close-up, a cheetah runs at full speed in a narrow canyon, its golden fur gleaming in the sun, and its black tear marks clearly visible. Shot from a low angle, the cheetah's body is close to the ground, its muscles flowing, and its limbs alternately and powerfully step over stones and soil, stirring up dust. The cheetah's eyes are sharp, staring at the target in front of it, showing unparalleled speed and strength. The camera follows the cheetah's running trajectory, capturing every moment of leaping and turning, showing its amazing agility. The whole scene unfolds in a tense chase rhythm, full of wild charm and competition for survival."**
