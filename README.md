@@ -14,19 +14,19 @@
 <h1>How to run  Wan2.2 localy on 8GB VRAM (!!model code changed!!)</h1>
 <ol>
 <li> huggingface-cli download Wan-AI/Wan2.2-T2V-A14B --local-dir ./Wan2.2-T2V-A14B</li>
-<li> convert high_noise_model and low_noise_model to bfloat16 to fit one block in 8GB VRAM with <strong>convert_safetensors.py</strong> </li>
+<li> convert high_noise_model and low_noise_model to float16 to fit one block in 8GB VRAM with <strong>convert_safetensors.py</strong> </li>
 <li> run <strong>optimize_files.py</strong> - split safetensors files by modules (run after convert_safetensors.py)</li>
 <li> python <strong>generate_local.py</strong> --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."</li>
 </ol>
 
 <p>* generated frames are limited to 21 (1.3 sec) to fit in 8GB VRAM</p>
-<p></p>* tested on <b>HELIOS PREDATOR 300</b> aptop (3070Ti 8GB) 79.50s for 21 frames,  65.80s/it for 17 frames, 13 frames 50.02s/it </p>
+<p></p>* tested on <b>HELIOS PREDATOR 300</b> aptop (3070Ti 8GB) 72.22 s/it for 21 frames,  60.74 s/it for 17 frames, 13 frames 48.70 s/it </p>
 
 Wan2.2 on 8GB VRAM: Run Advanced AI Video Generation Locally! (Optimization Guide) https://youtu.be/LlqnghCNxXM
 
 ## UPDATE 10/02/2025
 - **Optimized I2V-A14B** run long video generation loop with **loop.bat**
-
+ 
 https://github.com/user-attachments/assets/154df173-88d3-4ad1-b543-f7410380b13a
 
 
@@ -38,57 +38,66 @@ https://github.com/user-attachments/assets/154df173-88d3-4ad1-b543-f7410380b13a
 - **to start new generation loop** with new image / prompt / frame count / size - delete: **y_latents.pt**, **final_latents.pt**, **last_frame_latents.pt**
 
 ## Resulst on 3070 Ti laptop GPU 8gb vram + 25gb free ram (some layers loading from NVME drive, to fit all in ram need 30Gb free ram)
-        # size 640*360
-        # 33 frames 24.72 s/it
-
-        # size 640*480, sampling_steps 25+
-        # 17 frames 7.4Gb 23.21s/it 1.36s/it/frame    vae 7.66917 s
-        # 73 frames 7.7Gb 100s/it   1.36s/it/frame    vae 19.6426 s
+                # size 640*352
+        # 81 frames             58.23 s/it 51.32 s/it (*FP8)
+        # 33 frames             23.75 s/it              vae decode 4.5 sec
 
         # 704 * 396, sampling_steps 25+
-        # frame_num = 49        24.72 s/it
-        # frame_num = 81 (best) 77.50 s/it              vae decode 14.4 sec
+        # frame_num = 49        24.72 s/it (FP16)
+        # frame_num = 81        77.50 s/it (FP16)
 
         # size 720*405, sampling_steps 20+
-        # frame_num = 17        21.23 s/it
-        # frame_num = 77 (max)  82.11 s/it             vae decode 14.4 sec
-        # frame_num = 81        100.05 s/it (0.2Gb shared mem)
+        # frame_num = 17        21.23 s/it (FP16)
+        # frame_num = 77        82.11 s/it (FP16)
+        # frame_num = 81 (best) 70.74 s/it (*FP8)        vae decode 12.2 sec
 
-        # size 832*468 / 848*448, sampling_steps 20+
-        # frame_num = 17 27.18s/it
-        # frame_num = 53 74.34s/it                     vae decode 53 sec
-
-        ######################################################
-        # for 8gb vram and sizes > 832*468 vae use slow shared video memory
+        # size 832*464 / 848*448, sampling_steps 20+
+        # frame_num = 17        23.68 s/it               vae decode 3.54 sec
+        # frame_num = 53        74.34 s/it
+        # 65                    79.73 s/it
 
         # size 960*540, sampling_steps 16+
-        # 17 frames         34.30 s/it
-        # 41 frames (max)   75.02 s/it
+        # 17 frames             34.30 s/it (FP16)
+        # 41 frames             75.02 s/it (FP16)
+        # 45 frames             72.35 s/it (*FP8)       vae decode 11.7 sec
+
+        ######################################################
+        # for 8gb vram and sizes > 960*540 vae use slow shared video memory
+
+        # size = 1120 * 630
+        # 13 frames         29.24 s/it (*FP8)           vae decode 18 sec
+        # 33 frames (max)   85.10 s/it (FP16)           vae decode 57.93sec (10.1Gb)
+        # 33 frames         76.49 s/it (*FP8)
+        # 37                85.16 s/it (*FP8)           vae decode 75.73sec
 
         # size 1280*720, sampling_steps 16+
-        # 13 frames         50.02s/it  4.01s/it/frame
-        # 17 frames         65.80s/it  3.87s/it/frame
-        # 21 frames (max)   79.50s/it  3.78s/it/frame    vae decode 345 sec
-        # 25 frames (7.9Gb) 88.83s/it  3.55s/it/frame    vae decode 407 sec
+        # 13 frames         48.70 s/it (FP16)           vae decode 99 sec
+        # 13 frames         39.61 s/it (*FP8)
+        # 17 frames         60.74 s/it (FP16)
+        # 17 frames         54.02 s/it (*FP8)
+        # 21 frames (max)   72.22 s/it (FP16)
+        # 21 frames         66.18 s/it (*FP8)           vae decode 152 sec
 
-        # size 1600*896, sampling_steps 15+
-        # 13 frames (max) 85.47s/it    6.57s/it/frame
+        # size 1600*896 / 1568*896, sampling_steps 15+
+        # 13 frames (max)   85.47 s/it (FP16)
+        # 13 frames (max)   63.88 s/it (*FP8)           vae decode 284 sec
 
 # Compared to ComfyUA
-             ComfyUA (fp8)                         This (bfp16)
-    224*416  17 frames * 20 steps 144  sec         13.5 s/it * 20 = 270  sec    1.87x slower
-    512*288  17 frames * 20 steps 220  sec         15.4 s/it * 20 = 308  sec    1.4x  slower
-    720*400  17 frames * 20 steps 337  sec         21.6 s/it * 20 = 432  sec    1.28x slower
-    1280*720 17 frames * 20 steps 1180 sec         61.6 s/it * 20 = 1232 sec    1.04x slower
-
-              ComfyUA (fp8)                        This (fp16) coming soon optimized vae
-    1120*630 33 frames * 16 steps 1470 sec         89.43s/it * 16 = 1430 sec 
+              ComfyUA (fp8)                        This (fp16) optimized vae
+    1120*630 33 frames * 16 steps 1470 sec         89.43 s/it * 16 = 1362 sec 
     vae decode                    +117 sec                           +58 sec    
-    total                         1587 sec                          1488 sec    1.06x faster 
+    total                         1587 sec                          1488 sec    1.12x faster 
+                                                   
+                                                   This (*fp8) optimized vae
+                                                   76.49 s/it * 16 = 1224 sec
+                                                                      +58 sec
+                                                                     1282 sec  1.24x faster !!
+*fp8 - 3070 Ti doesn`t support calculations in fp8, loaded weights in fp8 converting for calculations to fp16 "on the fly"            
 
-Visualy hard to notice diference in quality between fp8 and bfp16..
+Visualy hard to notice diference in quality between fp8 and fp16..
 
 
+!!! Below original docs (this version is rewrited for speed on low gpu ram) next text onlu for reference. !!!
 -----
 
 [**Wan: Open and Advanced Large-Scale Video Generative Models**](https://arxiv.org/abs/2503.20314) <be>
