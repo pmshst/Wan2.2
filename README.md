@@ -11,7 +11,7 @@
 <br>
 
 
-<h1>How to run  Wan2.2 localy on 8GB VRAM (!!model code changed!!)</h1>
+<h1>How to run Wan2.2 locally on 8 GB VRAM (!!model code changed!!)</h1>
 <ol>
 <li> huggingface-cli download Wan-AI/Wan2.2-T2V-A14B --local-dir ./Wan2.2-T2V-A14B</li>
 <li> convert high_noise_model and low_noise_model to float16 to fit one block in 8GB VRAM with <strong>convert_safetensors.py</strong> </li>
@@ -19,8 +19,9 @@
 <li> python <strong>generate_local.py</strong> --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."</li>
 </ol>
 
-<p>* generated frames are limited to 21 (1.3 sec) to fit in 8GB VRAM</p>
-<p></p>* tested on <b>HELIOS PREDATOR 300</b> laptop (3070Ti 8GB) 72.22 s/it for 21 frames,  60.74 s/it for 17 frames, 13 frames 48.70 s/it </p>
+<p>Generated frames are limited to 21 (1.3 sec 1280*704) to fit within 8 GB VRAM.</p>
+<p>For full 5 second video max resolution: 720*405 (on 8Gb VRAM)</p>
+<p></p>* tested on <b>HELIOS PREDATOR 300</b> laptop (3070Ti 8GB) 1280*704 - 72.22 s/it for 21 frames,  60.74 s/it for 17 frames, 13 frames 48.70 s/it </p>
 
 Wan2.2 on 8GB VRAM: Run Advanced AI Video Generation Locally! (Optimization Guide) https://youtu.be/LlqnghCNxXM
 
@@ -32,8 +33,8 @@ https://github.com/user-attachments/assets/154df173-88d3-4ad1-b543-f7410380b13a
 
 
 ## How it works
-- setup same as T2V model: huggingface-cli download Wan-AI/Wan2.2-I2V-A14B --local-dir ./Wan2.2-I2V-A14B, than run convert and optimize scripts.
-- run file image2videolocal.py, example: **python generate_local.py --task i2v-A14B --size "1280*720" --image=./last_frame.png --ckpt_dir ./Wan2.2-I2V-A14B --prompt "In close-up, a cheetah runs at full speed in a narrow canyon, its golden fur gleaming in the sun, and its black tear marks clearly visible. Shot from a low angle, the cheetah's body is close to the ground, its muscles flowing, and its limbs alternately and powerfully step over stones and soil, stirring up dust. The cheetah's eyes are sharp, staring at the target in front of it, showing unparalleled speed and strength. The camera follows the cheetah's running trajectory, capturing every moment of leaping and turning, showing its amazing agility. The whole scene unfolds in a tense chase rhythm, full of wild charm and competition for survival."**
+- The setup is the same as for the T2V model: huggingface-cli download Wan-AI/Wan2.2-I2V-A14B --local-dir ./Wan2.2-I2V-A14B, then run the convert and optimize scripts.
+- run example: **python generate_local.py --task i2v-A14B --size "1280*720" --image=./last_frame.png --ckpt_dir ./Wan2.2-I2V-A14B --prompt "In close-up, a cheetah runs at full speed in a narrow canyon, its golden fur gleaming in the sun, and its black tear marks clearly visible. Shot from a low angle, the cheetah's body is close to the ground, its muscles flowing, and its limbs alternately and powerfully step over stones and soil, stirring up dust. The cheetah's eyes are sharp, staring at the target in front of it, showing unparalleled speed and strength. The camera follows the cheetah's running trajectory, capturing every moment of leaping and turning, showing its amazing agility. The whole scene unfolds in a tense chase rhythm, full of wild charm and competition for survival."**
 - or edit prompt in **loop.bat** and run (command runs in loop, each iteration do one spep: create latent from image -> y_latents.pt, run inference -> final_latents.pt, decode video final_latents.pt -> last_frame_latents.pt, create latent from last frame last_frame_latents.pt -> y_latents.pt, run inference ...)
 - **to start new generation loop** with new image / prompt / frame count / size - delete: **y_latents.pt**, **final_latents.pt**, **last_frame_latents.pt**
 
@@ -84,9 +85,9 @@ https://github.com/user-attachments/assets/154df173-88d3-4ad1-b543-f7410380b13a
 
 # Compared to ComfyUA
               ComfyUA (fp8)                        This (fp16) optimized vae
-    1120*630 33 frames * 16 steps 1470 sec         89.43 s/it * 16 = 1362 sec 
+    1120*630 33 frames * 16 steps 1470 sec         85.10 s/it * 16 = 1362 sec 
     vae decode                    +117 sec                           +58 sec    
-    total                         1587 sec                          1488 sec    1.12x faster 
+    total                         1587 sec                          1420 sec    1.12x faster 
                                                    
                                                    This (*fp8) optimized vae
                                                    76.49 s/it * 16 = 1224 sec
@@ -97,7 +98,7 @@ https://github.com/user-attachments/assets/154df173-88d3-4ad1-b543-f7410380b13a
 Visualy hard to notice diference in quality between fp8 and fp16..
 
 
-!!! Below original docs (this version is optimized for speed on low gpu ram) next text only for reference. !!!
+!!! The original documentation is below. This version is optimized for speed on GPUs with low VRAM. The following text is for reference only. !!!
 -----
 
 [**Wan: Open and Advanced Large-Scale Video Generative Models**](https://arxiv.org/abs/2503.20314) <be>
