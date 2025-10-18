@@ -97,7 +97,7 @@ https://github.com/user-attachments/assets/154df173-88d3-4ad1-b543-f7410380b13a
 Visualy hard to notice diference in quality between fp8 and fp16..
 
 
-!!! Below original docs (this version is rewrited for speed on low gpu ram) next text onlu for reference. !!!
+!!! Below original docs (this version is optimized for speed on low gpu ram) next text only for reference. !!!
 -----
 
 [**Wan: Open and Advanced Large-Scale Video Generative Models**](https://arxiv.org/abs/2503.20314) <be>
