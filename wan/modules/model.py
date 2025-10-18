@@ -90,117 +90,6 @@ def print_gpu_memory_report():
     print("-" * 100)
 
 
-class Fp4(torch.Tensor):
-    @staticmethod
-    def __new__(cls, data, scale=None, zero_point=None):
-        """
-        data: original FP32/FP16 tensor to quantize.
-        scale, zero_point: optional precomputed quantization params.
-        """
-        if not isinstance(data, torch.Tensor):
-            data = torch.tensor(data, dtype=torch.float32)
-
-        # Quantize to 4-bit (0..15) and pack into uint8
-        if scale is None or zero_point is None:
-            # Asymmetric quantization (min-max)
-            min_val = data.min()
-            max_val = data.max()
-            scale = (max_val - min_val) / 15.0
-            zero_point = (-min_val / scale).round().clamp(0, 15)
-        else:
-            scale = scale.to(data.device)
-            zero_point = zero_point.to(data.device).round().clamp(0, 15)
-
-        # Quantize
-        quantized = ((data / scale) + zero_point).round().clamp(0, 15).to(torch.uint8)
-
-        # Pack two 4-bit values into one uint8
-        # Only works for even-sized tensors; pad if needed
-        if quantized.numel() % 2 != 0:
-            quantized = F.pad(quantized, (0, 1), value=0)
-        packed = (quantized[::2] << 4) | quantized[1::2]
-
-        # Store as uint8 tensor with metadata
-        instance = torch.Tensor._make_subclass(cls, packed, require_grad=False)
-        instance._scale = scale
-        instance._zero_point = zero_point.to(torch.uint8)
-        instance._original_shape = data.shape
-        return instance
-
-    def __repr__(self):
-        return f"Fp4(shape={self._original_shape}, device={self.device})"
-
-    def to(self, *args, **kwargs):
-        # Check if converting to float16/float32
-        dtype = kwargs.get("dtype", None)
-        if dtype in (torch.float16, torch.float32, torch.bfloat16):
-            return self.dequantize(dtype)
-        # Otherwise, delegate to parent (e.g., .to(device))
-        new_tensor = super().to(*args, **kwargs)
-        if new_tensor is not self:
-            # Preserve metadata
-            new_tensor._scale = self._scale
-            new_tensor._zero_point = self._zero_point
-            new_tensor._original_shape = self._original_shape
-        return new_tensor
-
-    def dequantize(self, dtype=torch.float16):
-        """Fast dequantization to target dtype (e.g., float16)."""
-        device = self.device
-        # Unpack uint8 -> two uint4 values
-        unpacked = torch.empty(self.numel() * 2, dtype=torch.uint8, device=device)
-        unpacked[::2] = (self >> 4) & 0x0F
-        unpacked[1::2] = self & 0x0F
-
-        # Trim padding if original shape was odd
-        if unpacked.shape[0] != self._original_shape.numel():
-            unpacked = unpacked[:self._original_shape.numel()]
-
-        # Dequantize: (q - zp) * scale
-        dequant = (unpacked.to(dtype) - self._zero_point.to(dtype)) * self._scale.to(dtype)
-        return dequant.view(self._original_shape)
-
-
-class QuantizedParameter(torch.nn.Parameter):
-    def __new__(cls, data=None, requires_grad=True, quantize_on_init=True):
-        if data is None:
-            data = torch.empty(0)
-
-        # If quantize_on_init=True and data is float, quantize it
-        if quantize_on_init and data.dtype in (torch.float32, torch.float16, torch.bfloat16):
-            # Replace with your Fp4 logic
-            quantized_data = Fp4(data)
-            instance = torch.Tensor._make_subclass(cls, quantized_data, requires_grad=requires_grad)
-            instance._is_quantized = True
-            instance._original_dtype = data.dtype
-        else:
-            # Already quantized or non-float: store as-is
-            instance = torch.Tensor._make_subclass(cls, data, requires_grad=requires_grad)
-            instance._is_quantized = getattr(data, '_is_quantized', False)
-            instance._original_dtype = getattr(data, '_original_dtype', data.dtype)
-        return instance
-
-    def to(self, *args, **kwargs):
-        # If converting to float dtype, dequantize
-        dtype = kwargs.get('dtype', None)
-        if dtype in (torch.float32, torch.float16, torch.bfloat16):
-            if getattr(self, '_is_quantized', False):
-                return self.dequantize(dtype)
-        return super().to(*args, **kwargs)
-
-    def dequantize(self, dtype=torch.float16):
-        if hasattr(self.data, 'dequantize'):
-            return self.data.dequantize(dtype)
-        return self.data.to(dtype)
-
-# Save original for safety (optional)
-#_original_Parameter = nn.Parameter
-
-# Replace globally
-#nn.Parameter = QuantizedParameter
-#torch.nn.Parameter = QuantizedParameter
-
-
 class nnLinear2(nn.Module):
     __constants__ = ["in_features", "out_features"]
     in_features: int
@@ -304,15 +193,6 @@ class DynamicSwapInstaller:
                         return None
                     if p.__class__ == torch.nn.Parameter:
                         return p.to(device="cuda")
-                        if name not in self.n:
-                            self.n[name] = p.to(device="cuda")
-                            return self.n[name]
-                        else:
-                            #print(name + "_out")
-                            n1 = self.n[name]
-                            del self.n[name]
-                            return n1
-                        #return n1.to(dtype=dtype_c)
                     else:
                         n1 = p.to(device="cuda")
                         return n1.to(dtype=dtype_c)
@@ -336,7 +216,6 @@ class DynamicSwapInstaller:
         for m in model.modules():
             count_modules += 1
             DynamicSwapInstaller._install_module(m, **kwargs)
-        # print("installed modules " + str(count_modules) + "\n")
         return
 
 
@@ -355,21 +234,13 @@ class DynamicSwapInstaller2:
                         return None
                     if p.__class__ == torch.nn.Parameter:
                         return p.to(device="cuda").to(dtype=dtype_c)
-                        #if name not in self.n:
-                        #    n1 = p.to(device="cuda")
-                        #    self.n[name] = n1.to(dtype=dtype_c)
-                        #    return self.n[name]
-                        #else:
-                        #    n1 = self.n[name]
-                        #    del self.n[name]
-                        #    return n1
-                        #return n1.to(dtype=dtype_c)
                     else:
                         n1 = p.to(device="cuda")
                         return n1.to(dtype=dtype_c)
             if '_buffers' in self.__dict__:
                 _buffers = self.__dict__['_buffers']
                 if name in _buffers:
+                    return _buffers[name]
                     n1 = _buffers[name].to(device="cuda")
                     return n1.to(dtype=dtype_c)
             return super(original_class, self).__getattr__(name)
@@ -387,65 +258,15 @@ class DynamicSwapInstaller2:
         for m in model.modules():
             count_modules += 1
             DynamicSwapInstaller2._install_module(m, **kwargs)
-        # print("installed modules " + str(count_modules) + "\n")
         return
-
-
-def pack_float16_to_bits1x8(tensor: torch.Tensor, threshold: float = 0.0) -> torch.Tensor:
-    # Flatten the tensor to 1D while preserving total elements
-    original_shape = tensor.shape
-    flat_tensor = tensor.flatten()  # Convert [1,6,5120] to [30720]
-
-    # Step 1: Convert float16 to binary (0/1)
-    binary = (flat_tensor >= threshold).to(torch.uint8)
-
-    # Step 2: Pad to multiple of 8
-    n = binary.numel()
-    pad_len = (8 - n % 8) % 8
-    if pad_len > 0:
-        binary = torch.nn.functional.pad(binary, (0, pad_len))
-
-    # Step 3: Reshape into groups of 8
-    grouped = binary.view(-1, 8)
-
-    # Step 4: Pack each group into a byte
-    powers = torch.tensor([128, 64, 32, 16, 8, 4, 2, 1],
-                          dtype=torch.uint8, device=tensor.device)
-    packed = (grouped * powers).sum(dim=1)
-
-    return packed  # Returns [3840] for [1,6,5120] input
-
-
-def unpack_bits1x8_to_float16(packed_tensor: torch.Tensor,
-                              original_shape: tuple,
-                              original_len: int) -> torch.Tensor:
-    # Ensure the tensor is uint8
-    if packed_tensor.dtype != torch.uint8:
-        packed_tensor = packed_tensor.to(torch.uint8)
-
-    # Create masks for each bit position (MSB to LSB)
-    masks = torch.tensor([128, 64, 32, 16, 8, 4, 2, 1],
-                         dtype=torch.uint8, device=packed_tensor.device)
-
-    # Unpack each byte to 8 bits using broadcasting
-    # Reshape packed_tensor to [n, 1] and masks to [1, 8]
-    expanded = packed_tensor.unsqueeze(-1)  # Shape: [n, 1]
-    bits = (expanded & masks) != 0  # Shape: [n, 8]
-
-    # Flatten to 1D and trim to original length
-    bits = bits.reshape(-1)[:original_len]
-
-    # Convert to float16 and reshape to original dimensions
-    float_tensor = bits.to(torch.float16) * 2 - 1  # 0→-1.0, 1→1.0
-    return float_tensor.reshape(original_shape)
 
 
 class DynamicQuantizer:
     @staticmethod
-    def _install_module(module: torch.nn.Module, **kwargs):
+    def _install_module(module: torch.nn.Module, device):
         original_class = module.__class__
+
         module.__dict__['forge_backup_original_class'] = original_class
-        @profile
         def hacked_get_attr(self, name: str):
             if '_parameters' in self.__dict__:
                 _parameters = self.__dict__['_parameters']
@@ -454,13 +275,12 @@ class DynamicQuantizer:
                     if p is None:
                         return None
                     if p.__class__ == torch.nn.Parameter:
-
-                        #p = unpack_bits1x8_to_float16(p.to("cuda"), module.original_shape[name], module.original_len[name])
-                        #print(name)
-                        #return p
-
+                        if p.device != device:
+                            p = p.to(device)
                         return p.to(dtype=dtype_c)
                     else:
+                        if p.device != device:
+                            p = p.to(device)
                         return p.to(dtype=dtype_c)
             if '_buffers' in self.__dict__:
                 _buffers = self.__dict__['_buffers']
@@ -469,21 +289,12 @@ class DynamicQuantizer:
                     return n1.to(dtype=dtype_c)
             return super(original_class, self).__getattr__(name)
 
-        @profile
         def hacked_set_attr(self, name, value):
             if '_parameters' in self.__dict__:
                 _parameters = self.__dict__['_parameters']
-                #if name in _parameters:
-                #    print(name)
                 if value.__class__ == torch.nn.Parameter:
-                    #value = value.to(dtype=torch.float8_e4m3fn)
                     value = value.to(dtype=torch.float8_e5m2)
-                    #module.original_shape[name] = value.shape
-                    #module.original_len[name] = value.numel()
-                    #value = pack_float16_to_bits1x8(value)
-
                     value = torch.nn.Parameter(value, requires_grad=False)
-
                     return super(original_class, self).__setattr__(name, value)
 
             return super(original_class, self).__setattr__(name, value)
@@ -492,18 +303,15 @@ class DynamicQuantizer:
             '__getattr__': hacked_get_attr,
             '__setattr__': hacked_set_attr,
         })
-        module.n = {}
-        module.original_shape = {}
-        module.original_len = {}
 
         return
 
     @staticmethod
-    def install_model(model: torch.nn.Module, **kwargs):
+    def install_model(model: torch.nn.Module, device):
         count_modules = 0
         for m in model.modules():
             count_modules += 1
-            DynamicQuantizer._install_module(m, **kwargs)
+            DynamicQuantizer._install_module(m, device)
         return
 
 
@@ -559,7 +367,6 @@ def rope_apply_(x, grid_sizes, freqs):
     return torch.stack(output)
 
 
-@profile
 def rope_apply(x, grid_sizes):
     global freqs_i
     n, c = x.size(2), x.size(3) // 2
@@ -596,13 +403,14 @@ class WanLayerNorm(nn.LayerNorm):
 
     def __init__(self, dim, eps=1e-6, elementwise_affine=False):
         super().__init__(dim, elementwise_affine=elementwise_affine, eps=eps)
-    @profile
+
     def forward(self, x):
         r"""
         Args:
             x(Tensor): Shape [B, L, C]
         """
         return super().forward(x)
+
 
 from typing import List, Optional, Tuple, Union
 _shape_t = Union[int, List[int]]
@@ -653,7 +461,6 @@ class nnLayerNorm(nn.Module):
             if self.bias is not None:
                 init.zeros_(self.bias)
 
-    @profile
     def forward(self, input: Tensor) -> Tensor:
         if self.cache:
             x = F.layer_norm(
@@ -682,7 +489,7 @@ class WanLayerNormD(nnLayerNorm):
 
     def __init__(self, dim, eps=1e-6, elementwise_affine=False):
         super().__init__(dim, elementwise_affine=elementwise_affine, eps=eps)
-    @profile
+
     def forward(self, x):
         r"""
         Args:
@@ -842,10 +649,6 @@ class WanAttentionBlock(nn.Module):
             x = x + self.ffn(self.norm2(x) * (1 + e[4].squeeze(2)) + e[3].squeeze(2)) * e[5].squeeze(2)
             return x
 
-        #x, x_null = self.do_attn(x, x_null, e, seq_lens, grid_sizes)
-        #x, x_null = self.do_cross_attn(x, x_null, e, context, context_null, context_lens)
-
-
         return cross_attn_ffn(x, context, context_lens), cross_attn_ffn(x_null, context_null, context_lens)
 
     @profile
@@ -883,6 +686,7 @@ class WanAttentionBlock(nn.Module):
 
         return x, x_null
 
+
 class Head(nn.Module):
 
     def __init__(self, dim, out_dim, patch_size, eps=1e-6):
@@ -917,6 +721,7 @@ class Head(nn.Module):
 freqs_i = None
 blocks = None
 
+
 class WanModel(ModelMixin, ConfigMixin):
     r"""
     Wan diffusion backbone supporting both text-to-video and image-to-video.
@@ -941,46 +746,6 @@ class WanModel(ModelMixin, ConfigMixin):
         gc.collect()
         torch.cuda.empty_cache()
 
-    def load_safetensors_fp16_to_fp8(self, filename: str, device: str = "cuda") -> dict:
-        tensors = {}
-        with safe_open(filename, framework="pt", device="cpu") as f:
-            for key in f.keys():
-                tensor = f.get_tensor(key)
-                if tensor.dtype == torch.float16:
-                    tensor_fp8 = tensor.to(torch.float8_e4m3fn)#.to(device)
-                elif tensor.dtype == torch.float8_e4m3fn:
-                    tensor_fp8 = tensor#.to(device)
-                else:
-                    tensor_fp8 = tensor.to(torch.float8_e4m3fn)#.to(device)
-
-                tensors[key] = tensor_fp8
-        return tensors
-
-    def load_safetensors_fp8_to_fp16_cuda(self, filename: str, device: str = "cuda") -> dict:
-        tensors = {}
-        with safe_open(filename, framework="pt", device="cpu") as f:
-            for key in f.keys():
-                tensor = f.get_tensor(key)
-                if tensor.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-                    tensor_fp16 = tensor.to(torch.float16)#.to(device)
-                elif tensor.dtype == torch.float16:
-                    tensor_fp16 = tensor#.to(device)
-                else:
-                    tensor_fp16 = tensor.to(torch.float16)#.to(device)
-
-                tensors[key] = tensor_fp16
-        return tensors
-
-    def load_bf16_as_fp16(self, file_path, device="cpu"):
-        state_dict = safetensors.torch.load_file(file_path, device=device)
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            if v.dtype == torch.bfloat16:
-                new_state_dict[k] = v.to(torch.float16)
-            else:
-                new_state_dict[k] = v
-        return new_state_dict
-
     @profile
     def _load_and_move_part_v1(self, part_name: str, part_class, *args, **kwargs):
         file_path = self.model_path + part_name + '.safetensors'
@@ -989,38 +754,29 @@ class WanModel(ModelMixin, ConfigMixin):
         if getattr(self, attr_name):
             return
 
-        if dtype_c == torch.float16:
-            part_state_dict = safetensors.torch.load_file(file_path, device="cpu")
-        else:
-            if self.model_path[-4:-1] == "fp8":
-                part_state_dict = self.load_safetensors_fp8_to_fp16_cuda(file_path, device="cpu")
-            else:
-                part_state_dict = self.load_bf16_as_fp16(file_path, device="cpu")
+        part_state_dict = safetensors.torch.load_file(file_path, device="cpu")
 
         if self.blocks_in_vram > 0 and part_name.split(".")[0] == "blocks" \
                 and int(part_name.split(".")[1]) < self.blocks_in_vram:
+            # loading to vram
             if getattr(self, attr_name) == None:
                 with torch.device("meta"):
                     layer = part_class(*args, **kwargs)
                 layer = layer.to_empty(device="cpu")
 
-                if self.load_as_fp8:
-                    # part_state_dict = self.load_safetensors_fp16_to_fp8(file_path)
-                    DynamicQuantizer.install_model(layer, device="cuda")
-
                 layer.load_state_dict(part_state_dict, assign=True)
                 layer.to('cuda')
                 setattr(self, attr_name, layer)
+                if self.load_as_fp8:
+                    DynamicSwapInstaller2.install_model(getattr(self, attr_name), device="cuda")
             return
 
         if part_name.split(".")[0] == "blocks" \
                 and int(part_name.split(".")[1]) >= self.num_layers - self.blocks_in_ram:
+            # loading to ram
             with torch.device("meta"):
                 layer = part_class(*args, **kwargs)
             layer = layer.to_empty(device="cpu")
-
-            if self.load_as_fp8:
-                part_state_dict = self.load_safetensors_fp16_to_fp8(file_path)
 
             layer.load_state_dict(part_state_dict, assign=True)
             setattr(self, attr_name, layer)
@@ -1028,22 +784,25 @@ class WanModel(ModelMixin, ConfigMixin):
                 DynamicSwapInstaller2.install_model(getattr(self, attr_name), device="cuda")
             else:
                 DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
-        else:
-            if part_name.split(".")[0] == "blocks":
-                attr_name = "blocks"
-            if getattr(self, attr_name):
-                getattr(self, attr_name).load_state_dict(part_state_dict, assign=True)
-            else:
-                with torch.device("meta"):
-                    layer = part_class(*args, **kwargs)
-                layer = layer.to_empty(device="cpu")
-                layer.load_state_dict(part_state_dict, assign=True)
-                if part_name == "head":
-                    layer.to("cuda")
+            return
 
-                setattr(self, attr_name, layer)
-                if part_name != "head":
-                    DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
+        if part_name.split(".")[0] == "blocks":
+            attr_name = "blocks"
+        if getattr(self, attr_name):
+            # replacing block in vram from disc
+            getattr(self, attr_name).load_state_dict(part_state_dict, assign=True)
+        else:
+            with torch.device("meta"):
+                layer = part_class(*args, **kwargs)
+            layer = layer.to_empty(device="cpu")
+            layer.load_state_dict(part_state_dict, assign=True)
+            #if part_name == "head":
+            #    layer.to("cuda")
+
+            setattr(self, attr_name, layer)
+            #layer.to('cuda').to(dtype=dtype_c)
+            #if part_name != "head":
+            DynamicSwapInstaller2.install_model(getattr(self, attr_name), device="cuda")
 
         return
 
@@ -1111,19 +870,30 @@ class WanModel(ModelMixin, ConfigMixin):
 
         if model_type == 't2v_h':
             # todo: replace with your path to converted models see: optimize_files.py
-            self.model_path = "./Wan2.2-T2V-A14B/high_noise_model/"
+            if load_as_fp8:
+                self.model_path = "./Wan2.2-T2V-A14B/high_noise_model_fp8/"
+            else:
+                self.model_path = "./Wan2.2-T2V-A14B/high_noise_model/"
 
         if model_type == 't2v_l':
             # todo: replace with your path to converted models see: optimize_files.py
-            self.model_path = "./Wan2.2-T2V-A14B/low_noise_model/"
+            if load_as_fp8:
+                self.model_path = "./Wan2.2-T2V-A14B/low_noise_model_fp8/"
+            else:
+                self.model_path = "./Wan2.2-T2V-A14B/low_noise_model/"
 
         if model_type == 'i2v_h':
             # todo: replace with your path to converted models see: optimize_files.py
-            self.model_path = "./Wan2.2-I2V-A14B/high_noise_model/"
-
+            if load_as_fp8:
+                self.model_path = "./Wan2.2-I2V-A14B/high_noise_model_fp8/"
+            else:
+                self.model_path = "./Wan2.2-I2V-A14B/high_noise_model/"
         if model_type == 'i2v_l':
             # todo: replace with your path to converted models see: optimize_files.py
-            self.model_path = "./Wan2.2-I2V-A14B/low_noise_model/"
+            if load_as_fp8:
+                self.model_path = "./Wan2.2-I2V-A14B/low_noise_model_fp8/"
+            else:
+                self.model_path = "./Wan2.2-I2V-A14B/low_noise_model/"
 
         if model_type == 'ti2v':
             self.model_path = "./Wan2.2-TI2V-5B/model/"
@@ -1203,8 +973,7 @@ class WanModel(ModelMixin, ConfigMixin):
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
         # Move input data to the device for the operation
-        x = [self.patch_embedding(u.unsqueeze(0).to(device, dtype=dtype_c)) for u in x]  # +0.39 Gb patch_embedding cache
-        #torch.cuda.empty_cache()
+        x = [self.patch_embedding(u.unsqueeze(0).to(device, dtype=dtype_c)) for u in x]
 
 
         grid_sizes = torch.stack(
@@ -1252,7 +1021,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
         del sin_embed
 
-        #e0 = self.time_projection(e).unflatten(2, (6, self.dim)) # +1.3Gb
+        #e0 = self.time_projection(e).unflatten(2, (6, self.dim))
         self.register_buffer("e0", self.time_projection(e).unflatten(2, (6, self.dim)))
 
         if not self.text_embedding:
@@ -1277,8 +1046,6 @@ class WanModel(ModelMixin, ConfigMixin):
         # --- Part 2: Main Blocks Loop ---
         x_null = x.clone()
         for i in range(self.num_layers):
-            #if i > 5:
-            #    continue
 
             block_name = f"blocks.{i}"
             start_l = time.time_ns()

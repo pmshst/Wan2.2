@@ -37,6 +37,7 @@ import psutil
 
 dtype_c = torch.float16
 
+
 class DynamicSwapInstaller:
     @staticmethod
     def _install_module(module: torch.nn.Module, **kwargs):
@@ -67,11 +68,6 @@ class DynamicSwapInstaller:
 
         return
 
-    def _uninstall_module(module: torch.nn.Module):
-        if 'forge_backup_original_class' in module.__dict__:
-            module.__class__ = module.__dict__.pop('forge_backup_original_class')
-        return
-
     @staticmethod
     def install_model(model: torch.nn.Module, **kwargs):
         count_modules = 0
@@ -79,12 +75,6 @@ class DynamicSwapInstaller:
             count_modules += 1
             DynamicSwapInstaller._install_module(m, **kwargs)
         # print("installed modules: " + str(count_modules) + "\n")
-        return
-
-    @staticmethod
-    def uninstall_model(model: torch.nn.Module):
-        for m in model.modules():
-            DynamicSwapInstaller._uninstall_module(m)
         return
 
 
@@ -99,14 +89,10 @@ def get_free_ram(human_readable=False):
     Returns:
         int or str: Available RAM in bytes or formatted string
     """
-    # Get virtual memory statistics
     mem = psutil.virtual_memory()
-
-    # Available memory includes reclaimable cache/buffers
     available_bytes = mem.available
 
     if human_readable:
-        # Convert to human-readable format
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
             if available_bytes < 1024:
                 return f"{available_bytes:.2f} {unit}"
@@ -225,6 +211,19 @@ class WanI2VLocal:
                 getattr(self, required_model_name).to(self.device)
         return getattr(self, required_model_name)
 
+    def round_down_to_4x_plus_1(self, x):
+        if x < 5:
+            return 5
+        k = math.floor((x - 1) / 4)
+        return 4 * k + 1
+
+    def get_frames_from_y(self, y):
+        A = 12512899.2464896
+        B = -0.836821147100733
+        x = (y / A) ** (1 / B)
+        x_rounded = self.round_down_to_4x_plus_1(x)
+        return x_rounded
+
     def generate(self,
                  input_prompt,
                  img,
@@ -280,33 +279,32 @@ class WanI2VLocal:
             guide_scale, float) else guide_scale
         img = TF.to_tensor(img).sub_(0.5).div_(0.5).to(self.device, dtype=dtype_c)
 
-        frame_num = 13
-        sampling_steps = 16  # 16+ best (high res 1280*720), 25+ (low res 640*360)
+        # sampling_steps = 16  # 16+ best (high res 1280*720), 25+ (low res 640*360)
         # max_area = 720 * 1280 default
 
-        max_area = 640*352
+        # max_area = 720*405
 
         # size 640*352
         # 81 frames             58.23 s/it 51.32 s/it (*FP8)
-        # 33 frames             23.75 s/it             vae decode 4.5 sec
+        # 33 frames             23.75 s/it              vae decode 4.5 sec
 
         # 704 * 396, sampling_steps 25+
-        # frame_num = 49        24.72 s/it
-        # frame_num = 81        77.50 s/it
+        # frame_num = 49        24.72 s/it (FP16)
+        # frame_num = 81        77.50 s/it (FP16)
 
         # size 720*405, sampling_steps 20+
-        # frame_num = 17        21.23 s/it
-        # frame_num = 77        82.11 s/it
-        # frame_num = 81 (best) 76.51 s/it (*FP8)       vae decode 12.2 sec
+        # frame_num = 17        21.23 s/it (FP16)
+        # frame_num = 77        82.11 s/it (FP16)
+        # frame_num = 81 (best) 70.74 s/it (*FP8)        vae decode 12.2 sec
 
         # size 832*464 / 848*448, sampling_steps 20+
-        # frame_num = 17        23.68s/it               vae decode 3.54 sec
-        # frame_num = 53        74.34s/it
-        # 65
+        # frame_num = 17        23.68 s/it               vae decode 3.54 sec
+        # frame_num = 53        74.34 s/it
+        # 65                    79.73 s/it
 
         # size 960*540, sampling_steps 16+
-        # 17 frames             34.30 s/it
-        # 41 frames             75.02 s/it
+        # 17 frames             34.30 s/it (FP16)
+        # 41 frames             75.02 s/it (FP16)
         # 45 frames             72.35 s/it (*FP8)       vae decode 11.7 sec
 
         ######################################################
@@ -314,22 +312,25 @@ class WanI2VLocal:
 
         # size = 1120 * 630
         # 13 frames         29.24 s/it (*FP8)           vae decode 18 sec
-        # 33 frames (max)   85.10 s/it                  vae decode 57.93sec (10.1Gb)
+        # 33 frames (max)   85.10 s/it (FP16)           vae decode 57.93sec (10.1Gb)
         # 33 frames         76.49 s/it (*FP8)
         # 37                85.16 s/it (*FP8)           vae decode 75.73sec
 
         # size 1280*720, sampling_steps 16+
-        # 13 frames         48.70 s/it   3.74s/it/frame   39.61s/it fp8, vae decode 99 sec
-        # 17 frames         60.74 s/it   3.57s/it/frame   54.02s/it fp8
-        # 21 frames (max)   72.22 s/it   3.43s/it/frame   66.18s/it fp8, vae decode 152 sec
+        # 13 frames         48.70 s/it (FP16)           vae decode 99 sec
+        # 13 frames         39.61 s/it (*FP8)
+        # 17 frames         60.74 s/it (FP16)
+        # 17 frames         54.02 s/it (*FP8)
+        # 21 frames (max)   72.22 s/it (FP16)
+        # 21 frames         66.18 s/it (*FP8)           vae decode 152 sec
 
-        # size 1600*896, sampling_steps 15+
-        # 13 frames (max)   85.47s/it    6.57s/it/frame
+        # size 1600*896 / 1568*896, sampling_steps 15+
+        # 13 frames (max)   85.47 s/it (FP16)
+        # 13 frames (max)   63.88 s/it (*FP8)           vae decode 284 sec
 
         self.infinity_loop = True  # for generating long videos (continued from the last frame)
-        self.load_as_fp8 = True  # use 2x less ram, 20% faster
+        self.load_as_fp8 = True  # use 2x less ram, 10% faster
 
-        F = frame_num
         h, w = img.shape[1:]
         aspect_ratio = h / w
         lat_h = round(
@@ -340,6 +341,15 @@ class WanI2VLocal:
             self.patch_size[2] * self.patch_size[2])
         h = lat_h * self.vae_stride[1]
         w = lat_w * self.vae_stride[2]
+
+        free_memory, total_memory = torch.cuda.mem_get_info()
+        if free_memory < 9*1024*1024*1024:
+            # limit frames
+            frame_num_limit = self.get_frames_from_y(w * h)
+            if frame_num_limit < 81:
+                frame_num = frame_num_limit
+
+        F = frame_num
 
         logging.info(f"Generating {frame_num} frames {w}*{h}")
 
@@ -501,7 +511,6 @@ class WanI2VLocal:
                 if self.load_as_fp8:
                     block_mem = block_mem/2
                 blocks_in_ram = int(get_free_ram() / block_mem)
-                free_memory, total_memory = torch.cuda.mem_get_info()
 
                 fk = (frame_num - 1) / 4 + 1
                 x_sixe = 5120 * (((w/8) * (h/8)) / 4 * fk) * 2
@@ -515,8 +524,6 @@ class WanI2VLocal:
                 if blocks_in_ram > 40 - blocks_in_vram:
                     blocks_in_ram = 40 - blocks_in_vram
 
-                blocks_in_ram = 40
-                blocks_in_vram = 0
                 it = 1
                 model = None
                 for _, t in enumerate(tqdm(timesteps)):
@@ -620,4 +627,3 @@ class WanI2VLocal:
 
 # kernprof -l -v generate_local.py --task i2v-A14B --size "1280*720" --image=./last_frame.png --ckpt_dir ./Wan2.2-I2V-A14B --prompt "Telephoto lens. A tiger walking through the jungle. The camera follows the tiger smoothly, keeping it in the center of the frame as the muscles ripple slowly beneath its striped fur. The tiger's eyes are focused intently ahead, and its steps are steady and powerful. The background is dense green vegetation and trees, with sunlight filtering through the leaves to cast mottled light and shadows."
 # kernprof -l -v generate_local.py --task i2v-A14B --size "1280*720" --image=./last_frame.png --ckpt_dir ./Wan2.2-I2V-A14B --prompt "In close-up, a cheetah runs at full speed in a narrow canyon, its golden fur gleaming in the sun, and its black tear marks clearly visible. Shot from a low angle, the cheetah's body is close to the ground, its muscles flowing, and its limbs alternately and powerfully step over stones and soil, stirring up dust. The cheetah's eyes are sharp, staring at the target in front of it, showing unparalleled speed and strength. The camera follows the cheetah's running trajectory, capturing every moment of leaping and turning, showing its amazing agility. The whole scene unfolds in a tense chase rhythm, full of wild charm and competition for survival."
-# kernprof -l -v generate_local.py --task i2v-A14B --size "1280*720" --image=./last_frame.png --ckpt_dir ./Wan2.2-I2V-A14B --prompt "film grade professionalquality"
