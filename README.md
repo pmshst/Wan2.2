@@ -38,7 +38,7 @@ https://github.com/user-attachments/assets/154df173-88d3-4ad1-b543-f7410380b13a
 - or edit prompt in **loop.bat** and run (command runs in loop, each iteration do one spep: create latent from image -> y_latents.pt, run inference -> final_latents.pt, decode video final_latents.pt -> last_frame_latents.pt, create latent from last frame last_frame_latents.pt -> y_latents.pt, run inference ...)
 - **to start new generation loop** with new image / prompt / frame count / size - delete: **y_latents.pt**, **final_latents.pt**, **last_frame_latents.pt**
 
-## Resulst on 3070 Ti laptop GPU 8gb vram + 25gb free ram (some layers loading from NVME drive, to fit all in ram need 30Gb free ram)
+## Results on a 3070 Ti laptop GPU with 8 GB VRAM + 25 GB free RAM (some layers are loaded from the NVME drive; to fit everything in RAM, 30 GB of free RAM is needed):
                 # size 640*352
         # 81 frames             58.23 s/it 51.32 s/it (*FP8)
         # 33 frames             23.75 s/it              vae decode 4.5 sec
