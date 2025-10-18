@@ -2,20 +2,19 @@
 import logging
 
 import torch
-import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-
-#from line_profiler import profile
-#from memory_profiler import profile
+DTYPE = torch.float16
 
 __all__ = [
     'Wan2_1_VAE',
 ]
 
 CACHE_T = 2
+if CACHE_T == 1:
+    torch.cuda.set_per_process_memory_fraction(1.0, device=0)
 
 
 class CausalConv3d(nn.Conv3d):
@@ -48,14 +47,16 @@ class RMS_norm(nn.Module):
         shape = (dim, *broadcastable_dims) if channel_first else (dim,)
 
         self.channel_first = channel_first
-        self.scale = dim**0.5
+        scale = dim**0.5
         self.gamma = nn.Parameter(torch.ones(shape))
-        self.bias = nn.Parameter(torch.zeros(shape)) if bias else 0.
+        self.bias = nn.Parameter(torch.zeros(shape)) if bias else None
+        self.register_buffer("scale_tensor", torch.tensor(scale, device="cuda", dtype=DTYPE))
 
     def forward(self, x):
-        return F.normalize(
-            x, dim=(1 if self.channel_first else
-                    -1)) * self.scale * self.gamma + self.bias
+        if self.bias:
+            return F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale_tensor * self.gamma + self.bias
+        else:
+            return F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale_tensor * self.gamma
 
 
 class Upsample(nn.Upsample):
@@ -114,7 +115,7 @@ class Resample(nn.Module):
                 else:
 
                     cache_x = x[:, :, -CACHE_T:, :, :].clone()
-                    if cache_x.shape[2] < 2 and feat_cache[
+                    if cache_x.shape[2] < CACHE_T and feat_cache[
                             idx] is not None and feat_cache[idx] != 'Rep':
                         # cache last frame of last two chunk
                         cache_x = torch.cat([
@@ -122,7 +123,7 @@ class Resample(nn.Module):
                                 cache_x.device), cache_x
                         ],
                                             dim=2)
-                    if cache_x.shape[2] < 2 and feat_cache[
+                    if cache_x.shape[2] < CACHE_T and feat_cache[
                             idx] is not None and feat_cache[idx] == 'Rep':
                         cache_x = torch.cat([
                             torch.zeros_like(cache_x),
@@ -204,19 +205,17 @@ class ResidualBlock(nn.Module):
         self.shortcut = CausalConv3d(in_dim, out_dim, 1) \
             if in_dim != out_dim else nn.Identity()
 
-    def forward(self, x, feat_cache=None, feat_idx=[0]):  # original:  345 s  20.8Gb
+    def forward(self, x, feat_cache=None, feat_idx=[0]):  # original:  203 s  12.8Gb
         h = self.shortcut(x)
         for layer in self.residual:
             if isinstance(layer, CausalConv3d) and feat_cache is not None:
                 idx = feat_idx[0]
                 cache_x = x[:, :, -CACHE_T:, :, :].clone()
-                if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
+                if cache_x.shape[2] < CACHE_T and feat_cache[idx] is not None:
                     # cache last frame of last two chunk
-                    cache_x = torch.cat([
-                        feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(
-                            cache_x.device), cache_x
-                    ],
-                                        dim=2)
+                    cache_x = torch.cat(
+                        [feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device), cache_x],
+                        dim=2)
                 x = layer(x, feat_cache[idx])
                 feat_cache[idx] = cache_x
                 feat_idx[0] += 1
@@ -224,13 +223,13 @@ class ResidualBlock(nn.Module):
                 x = layer(x)
         return x + h
 
-    def forward_(self, x, feat_cache=None, feat_idx=None):  # less mem, same quality: 153 s 12Gb
+    def forward_(self, x, feat_cache=None, feat_idx=None):  # less mem, less consistency: 24 s 8.7Gb
         h = self.shortcut(x)
         for layer in self.residual:
             if isinstance(layer, CausalConv3d) and feat_cache is not None:
                 idx = feat_idx[0]
                 cache_x = x[:, :, -CACHE_T:, :, :].clone()
-                if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
+                if cache_x.shape[2] < CACHE_T and feat_cache[idx] is not None:
                     cache_x = torch.cat([
                         feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device),
                         cache_x
@@ -445,11 +444,11 @@ class Decoder3d(nn.Module):
 
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         ## conv1
-        print(f"Memory before conv1: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        #print(f"Memory before conv1: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
         if feat_cache is not None:
             idx = feat_idx[0]
             cache_x = x[:, :, -CACHE_T:, :, :].clone()
-            if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
+            if cache_x.shape[2] < CACHE_T and feat_cache[idx] is not None:
                 # cache last frame of last two chunk
                 cache_x = torch.cat([
                     feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(
@@ -462,8 +461,7 @@ class Decoder3d(nn.Module):
         else:
             x = self.conv1(x)
 
-        print(f"Memory before middle: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-
+        #print(f"Memory before middle: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
         ## middle
         for layer in self.middle:
             if isinstance(layer, ResidualBlock) and feat_cache is not None:
@@ -471,21 +469,21 @@ class Decoder3d(nn.Module):
             else:
                 x = layer(x)
 
-        print(f"Memory before upsamples: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        #print(f"Memory before upsamples: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
         ## upsamples
         for layer in self.upsamples:
             if feat_cache is not None:
                 x = layer(x, feat_cache, feat_idx)  # +1119.9 MiB +11494.4 MiB
             else:
                 x = layer(x)
-        print(f"Memory before head: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        #print(f"Memory before head: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
         ## head
         for layer in self.head:
             if isinstance(layer, CausalConv3d) and feat_cache is not None:
                 idx = feat_idx[0]
                 cache_x = x[:, :, -CACHE_T:, :, :].clone()
-                if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
+                if cache_x.shape[2] < CACHE_T and feat_cache[idx] is not None:
                     # cache last frame of last two chunk
                     cache_x = torch.cat([
                         feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(
@@ -497,7 +495,7 @@ class Decoder3d(nn.Module):
                 feat_idx[0] += 1
             else:
                 x = layer(x)
-        print(f"Memory afrer head: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        #print(f"Memory afrer head: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
         return x
 
 
@@ -574,8 +572,8 @@ class WanVAE_(nn.Module):
         self.clear_cache()
         # z: [b,c,t,h,w]
         if isinstance(scale[0], torch.Tensor):
-            z = z / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(
-                1, self.z_dim, 1, 1, 1)
+            z = z / scale[1].view(1, self.z_dim, 1, 1, 1).to(dtype=DTYPE) + scale[0].view(
+                1, self.z_dim, 1, 1, 1).to(dtype=DTYPE)
         else:
             z = z / scale[1] + scale[0]
         x = self.conv2(z)
@@ -647,8 +645,10 @@ class Wan2_1_VAE:
     def __init__(self,
                  z_dim=16,
                  vae_pth='cache/vae_step_411000.pth',
-                 dtype=torch.float,
+                 dtype=DTYPE,
                  device="cuda"):
+        global DTYPE
+        DTYPE = dtype
         self.dtype = dtype
         self.device = device
 
@@ -662,7 +662,7 @@ class Wan2_1_VAE:
         ]
         self.mean = torch.tensor(mean, dtype=dtype, device=device)
         self.std = torch.tensor(std, dtype=dtype, device=device)
-        self.scale = [self.mean, 1.0 / self.std]
+        self.scale = [self.mean, torch.tensor(1.0, dtype=dtype, device=device) / self.std]
 
         # init model
         self.model = _video_vae(
@@ -674,16 +674,14 @@ class Wan2_1_VAE:
         """
         videos: A list of videos each with shape [C, T, H, W].
         """
-        with amp.autocast(dtype=self.dtype):
-            return [
-                self.model.encode(u.unsqueeze(0), self.scale).squeeze(0)
-                for u in videos
-            ]
+        return [
+            self.model.encode(u.unsqueeze(0).to(dtype=DTYPE), self.scale).squeeze(0)
+            for u in videos
+        ]
 
     def decode(self, zs):
-        with torch.no_grad(), amp.autocast(dtype=self.dtype):
-            return [
-                self.model.decode(u.unsqueeze(0),
-                                  self.scale).clamp_(-1, 1).squeeze(0)
-                for u in zs
-            ]
+        return [
+            self.model.decode(u.unsqueeze(0).to(dtype=DTYPE),
+                              self.scale).clamp_(-1, 1).squeeze(0)
+            for u in zs
+        ]

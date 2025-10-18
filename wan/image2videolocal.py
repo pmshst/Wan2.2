@@ -35,6 +35,8 @@ from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 
 import psutil
 
+dtype_c = torch.float16
+
 
 class DynamicSwapInstaller:
     @staticmethod
@@ -66,24 +68,13 @@ class DynamicSwapInstaller:
 
         return
 
-    def _uninstall_module(module: torch.nn.Module):
-        if 'forge_backup_original_class' in module.__dict__:
-            module.__class__ = module.__dict__.pop('forge_backup_original_class')
-        return
-
     @staticmethod
     def install_model(model: torch.nn.Module, **kwargs):
         count_modules = 0
         for m in model.modules():
             count_modules += 1
             DynamicSwapInstaller._install_module(m, **kwargs)
-        print("installed modules: " + str(count_modules) + "\n")
-        return
-
-    @staticmethod
-    def uninstall_model(model: torch.nn.Module):
-        for m in model.modules():
-            DynamicSwapInstaller._uninstall_module(m)
+        # print("installed modules: " + str(count_modules) + "\n")
         return
 
 
@@ -98,14 +89,10 @@ def get_free_ram(human_readable=False):
     Returns:
         int or str: Available RAM in bytes or formatted string
     """
-    # Get virtual memory statistics
     mem = psutil.virtual_memory()
-
-    # Available memory includes reclaimable cache/buffers
     available_bytes = mem.available
 
     if human_readable:
-        # Convert to human-readable format
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
             if available_bytes < 1024:
                 return f"{available_bytes:.2f} {unit}"
@@ -164,7 +151,6 @@ class WanI2VLocal:
 
         self.num_train_timesteps = config.num_train_timesteps
         self.boundary = config.boundary
-        self.param_dtype = torch.bfloat16 #config.param_dtype
         self.t5_fsdp = t5_fsdp
 
         if t5_fsdp or dit_fsdp or use_sp:
@@ -177,14 +163,10 @@ class WanI2VLocal:
         self.vae_stride = config.vae_stride
         self.patch_size = config.patch_size
         self.vae = None
-        #self.vae = Wan2_1_VAE(
-        #    vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
-        #    device="cpu")
 
         self.low_noise_model = None
         self.use_sp = use_sp
         self.dit_fsdp = dit_fsdp
-        self.convert_model_dtype = True #convert_model_dtype
 
         self.high_noise_model = None
 
@@ -194,50 +176,6 @@ class WanI2VLocal:
             self.sp_size = 1
 
         self.sample_neg_prompt = config.sample_neg_prompt
-
-    def _configure_model(self, model, use_sp, dit_fsdp, shard_fn,
-                         convert_model_dtype):
-        """
-        Configures a model object. This includes setting evaluation modes,
-        applying distributed parallel strategy, and handling device placement.
-
-        Args:
-            model (torch.nn.Module):
-                The model instance to configure.
-            use_sp (`bool`):
-                Enable distribution strategy of sequence parallel.
-            dit_fsdp (`bool`):
-                Enable FSDP sharding for DiT model.
-            shard_fn (callable):
-                The function to apply FSDP sharding.
-            convert_model_dtype (`bool`):
-                Convert DiT model parameters dtype to 'config.param_dtype'.
-                Only works without FSDP.
-
-        Returns:
-            torch.nn.Module:
-                The configured model.
-        """
-        model.eval().requires_grad_(False)
-
-        if use_sp:
-            for block in model.blocks:
-                block.self_attn.forward = types.MethodType(
-                    sp_attn_forward, block.self_attn)
-            model.forward = types.MethodType(sp_dit_forward, model)
-
-        if dist.is_initialized():
-            dist.barrier()
-
-        if dit_fsdp:
-            model = shard_fn(model)
-        else:
-            if convert_model_dtype:
-                model.to(self.param_dtype)
-            if not self.init_on_cpu:
-                model.to(self.device)
-
-        return model
 
     def _prepare_model_for_timestep(self, t, boundary, offload_model):
         r"""
@@ -273,6 +211,18 @@ class WanI2VLocal:
                 getattr(self, required_model_name).to(self.device)
         return getattr(self, required_model_name)
 
+    def round_down_to_4x_plus_1(self, x):
+        if x < 5:
+            return 5
+        k = math.floor((x - 1) / 4)
+        return 4 * k + 1
+
+    def get_frames_from_y(self, y):
+        A = 12512899.2464896
+        B = -0.836821147100733
+        x = (y / A) ** (1 / B)
+        x_rounded = self.round_down_to_4x_plus_1(x)
+        return x_rounded
 
     def generate(self,
                  input_prompt,
@@ -327,52 +277,60 @@ class WanI2VLocal:
         # preprocess
         guide_scale = (guide_scale, guide_scale) if isinstance(
             guide_scale, float) else guide_scale
-        img = TF.to_tensor(img).sub_(0.5).div_(0.5).to(self.device, dtype=torch.bfloat16)
+        img = TF.to_tensor(img).sub_(0.5).div_(0.5).to(self.device, dtype=dtype_c)
 
-        frame_num = 21
-        sampling_steps = 16  # 16+ best (high res 1280*720), 25+ (low res 640*360)
+        # sampling_steps = 16  # 16+ best (high res 1280*720), 25+ (low res 640*360)
         # max_area = 720 * 1280 default
 
-        # size 640*360
-        # 33 frames 24.72 s/it
+        # max_area = 720*405
 
-        # size 640*480, sampling_steps 25+
-        # 17 frames 7.4Gb 23.21s/it 1.36s/it/frame    vae 7.66917 s
-        # 73 frames 7.7Gb 100s/it   1.36s/it/frame    vae 19.6426 s
+        # size 640*352
+        # 81 frames             58.23 s/it 51.32 s/it (*FP8)
+        # 33 frames             23.75 s/it              vae decode 4.5 sec
 
         # 704 * 396, sampling_steps 25+
-        # frame_num = 49        24.72 s/it
-        # frame_num = 81 (best) 77.50 s/it              vae decode 14.4 sec
+        # frame_num = 49        24.72 s/it (FP16)
+        # frame_num = 81        77.50 s/it (FP16)
 
         # size 720*405, sampling_steps 20+
-        # frame_num = 17        21.23 s/it
-        # frame_num = 77 (max)  82.11 s/it             vae decode 14.4 sec
-        # frame_num = 81        100.05 s/it (0.2Gb shared mem)
+        # frame_num = 17        21.23 s/it (FP16)
+        # frame_num = 77        82.11 s/it (FP16)
+        # frame_num = 81 (best) 70.74 s/it (*FP8)        vae decode 12.2 sec
 
-        # size 832*468 / 848*448, sampling_steps 20+
-        # frame_num = 17 27.18s/it
-        # frame_num = 53 74.34s/it                     vae decode 53 sec
-
-        ######################################################
-        # for 8gb vram and sizes > 832*468 vae use slow shared video memory
+        # size 832*464 / 848*448, sampling_steps 20+
+        # frame_num = 17        23.68 s/it               vae decode 3.54 sec
+        # frame_num = 53        74.34 s/it
+        # 65                    79.73 s/it
 
         # size 960*540, sampling_steps 16+
-        # 17 frames         34.30 s/it
-        # 41 frames (max)   75.02 s/it
+        # 17 frames             34.30 s/it (FP16)
+        # 41 frames             75.02 s/it (FP16)
+        # 45 frames             72.35 s/it (*FP8)       vae decode 11.7 sec
+
+        ######################################################
+        # for 8gb vram and sizes > 960*540 vae use slow shared video memory
+
+        # size = 1120 * 630
+        # 13 frames         29.24 s/it (*FP8)           vae decode 18 sec
+        # 33 frames (max)   85.10 s/it (FP16)           vae decode 57.93sec (10.1Gb)
+        # 33 frames         76.49 s/it (*FP8)
+        # 37                85.16 s/it (*FP8)           vae decode 75.73sec
 
         # size 1280*720, sampling_steps 16+
-        # 13 frames         50.02s/it  4.01s/it/frame
-        # 17 frames         65.80s/it  3.87s/it/frame
-        # 21 frames (max)   79.50s/it  3.78s/it/frame    vae decode 345 sec
-        # 25 frames (7.9Gb) 88.83s/it  3.55s/it/frame    vae decode 407 sec
+        # 13 frames         48.70 s/it (FP16)           vae decode 99 sec
+        # 13 frames         39.61 s/it (*FP8)
+        # 17 frames         60.74 s/it (FP16)
+        # 17 frames         54.02 s/it (*FP8)
+        # 21 frames (max)   72.22 s/it (FP16)
+        # 21 frames         66.18 s/it (*FP8)           vae decode 152 sec
 
-        # size 1600*896, sampling_steps 15+
-        # 13 frames (max) 85.47s/it    6.57s/it/frame
+        # size 1600*896 / 1568*896, sampling_steps 15+
+        # 13 frames (max)   85.47 s/it (FP16)
+        # 13 frames (max)   63.88 s/it (*FP8)           vae decode 284 sec
 
-        self.without_neg_prompt = False  # 2x faster, poor objects consistency
         self.infinity_loop = True  # for generating long videos (continued from the last frame)
+        self.load_as_fp8 = True  # use 2x less ram, 10% faster
 
-        F = frame_num
         h, w = img.shape[1:]
         aspect_ratio = h / w
         lat_h = round(
@@ -384,8 +342,16 @@ class WanI2VLocal:
         h = lat_h * self.vae_stride[1]
         w = lat_w * self.vae_stride[2]
 
-        print(f"Generating {frame_num} frames {w}*{h}")
+        free_memory, total_memory = torch.cuda.mem_get_info()
+        if free_memory < 9*1024*1024*1024:
+            # limit frames
+            frame_num_limit = self.get_frames_from_y(w * h)
+            if frame_num_limit < 81:
+                frame_num = frame_num_limit
 
+        F = frame_num
+
+        logging.info(f"Generating {frame_num} frames {w}*{h}")
 
         max_seq_len = ((F - 1) // self.vae_stride[0] + 1) * lat_h * lat_w // (
             self.patch_size[1] * self.patch_size[2])
@@ -395,41 +361,37 @@ class WanI2VLocal:
         seed_g = torch.Generator(device=self.device)
         seed_g.manual_seed(seed)
 
-        msk = torch.ones(1, F, lat_h, lat_w, device=self.device, dtype=torch.bfloat16)
+        msk = torch.ones(1, F, lat_h, lat_w, device=self.device, dtype=dtype_c)
         msk[:, 1:] = 0
         msk = torch.concat([
             torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]
-        ],
-                           dim=1)
+        ], dim=1)
         msk = msk.view(1, msk.shape[1] // 4, 4, lat_h, lat_w)
         msk = msk.transpose(1, 2)[0]
 
         if n_prompt == "":
             n_prompt = self.sample_neg_prompt
 
-        print(f"Loading model T5EncoderModel")
+        logging.info("Loading model T5EncoderModel")
         latent_file_path = "./final_latents.pt"
         if not os.path.exists(latent_file_path):
-            print("--- STAGE 1: Generating latents from text prompt ---")
-            # Define the cache directory for prompt tensors
+            logging.info("--- STAGE 1: Generating latents from text prompt ---")
             cache_dir = "./prompts_cache_video"
             os.makedirs(cache_dir, exist_ok=True)
 
-            # Create a unique filename based on the prompts
             prompt_text = f"{input_prompt}-{n_prompt}"
             prompt_hash = hashlib.sha256(prompt_text.encode('utf-8')).hexdigest()
             cache_path = os.path.join(cache_dir, f"{prompt_hash}.pt")
 
-            # Check if cached tensors exist
             if os.path.exists(cache_path):
-                print(f"Loading cached prompt tensors from: {cache_path}")
+                logging.info(f"Loading cached prompt tensors from: {cache_path}")
                 cached_tensors = torch.load(cache_path, map_location=self.device)
-                context = cached_tensors['context']
-                context_null = cached_tensors['context_null']
+                context = [t.to(dtype_c) for t in cached_tensors['context']]
+                context_null = [t.to(dtype_c) for t in cached_tensors['context_null']]
+                del cached_tensors
             else:
-                print(f"No cache found. Encoding prompts and caching to: {cache_path}")
-                print(f"Loading model T5EncoderModel to device: {self.device}")
-                # Load the T5 model only when we need to encode new prompts
+                logging.info(f"No cache found. Encoding prompts and caching to: {cache_path}")
+                logging.info(f"Loading model T5EncoderModel to device: {self.device}")
                 self.text_encoder = T5EncoderModel(
                     text_len=self.config.text_len,
                     dtype=self.config.t5_dtype,
@@ -447,21 +409,19 @@ class WanI2VLocal:
                 gc.collect()
                 torch.cuda.empty_cache()
 
-                # Cache the newly computed prompt tensors for reuse
                 torch.save({
                     'context': context,
                     'context_null': context_null
                 }, cache_path)
 
-            print(f"Creating noise")
+            logging.info("Creating noise")
             start_inference = time.time_ns()
-
             noise = torch.randn(
                 16,
                 (F - 1) // self.vae_stride[0] + 1,
                 lat_h,
                 lat_w,
-                dtype=torch.bfloat16,
+                dtype=dtype_c,
                 generator=seed_g,
                 device=self.device)
 
@@ -470,8 +430,8 @@ class WanI2VLocal:
                 self.vae = Wan2_1_VAE(
                     vae_pth=os.path.join(self.checkpoint_dir, self.config.vae_checkpoint),
                     device=self.device,
-                    dtype=torch.bfloat16)
-                print(f"Found last frame continue video: {last_frame_latent}")
+                    dtype=dtype_c)
+                logging.info(f"Found last frame continue video: {last_frame_latent}")
                 lf = torch.load(last_frame_latent)
                 last_frame_for_interp = lf.unsqueeze(0).to(self.device)
                 resized_frame = torch.nn.functional.interpolate(
@@ -486,21 +446,21 @@ class WanI2VLocal:
                 prepared_video_tensor = torch.cat([first_frame_prepared, zero_padding], dim=1)
 
                 new_y = self.vae.encode([prepared_video_tensor])[0]
-                torch.save(new_y.to(dtype=torch.bfloat16), "./y_latents.pt")
+                torch.save(new_y.to(dtype=dtype_c), "./y_latents.pt")
                 os.remove("./last_frame_latents.pt")
-                print("y_latents prepared, run again to start inference")
+                logging.info("y_latents prepared, run again to start inference")
                 exit()
 
             y_latent = "./y_latents.pt"
             if os.path.exists(y_latent):
-                print("--- STAGE 1.1: Found pre-computed \"y\" latents. Loading. ---")
-                print(f"Loading latents from: {y_latent}")
+                logging.info("--- STAGE 1.1: Found pre-computed \"y\" latents. Loading. ---")
+                logging.info(f"Loading latents from: {y_latent}")
                 y = torch.load(y_latent)
             else:
                 self.vae = Wan2_1_VAE(
                     vae_pth=os.path.join(self.checkpoint_dir, self.config.vae_checkpoint),
                     device=self.device,
-                    dtype=torch.bfloat16)
+                    dtype=dtype_c)
                 y = self.vae.encode([
                     torch.concat([
                         torch.nn.functional.interpolate(
@@ -511,7 +471,7 @@ class WanI2VLocal:
                         dim=1).to(self.device)
                 ])[0]
                 torch.save(y, "./y_latents.pt")
-                print("y_latents prepared, run again to start inference")
+                logging.info("y_latents prepared, run again to start inference")
                 exit()
 
             y = torch.concat([msk, y])
@@ -520,8 +480,7 @@ class WanI2VLocal:
             gc.collect()
             torch.cuda.empty_cache()
 
-            print(f"Creating sample_scheduler")
-            # evaluation mode
+            logging.info(f"Creating sample_scheduler")
             with (torch.no_grad()):
                 boundary = self.boundary * self.num_train_timesteps
 
@@ -546,66 +505,43 @@ class WanI2VLocal:
                 else:
                     raise NotImplementedError("Unsupported solver.")
 
-                print(f"sample videos")
-                # sample videos
                 latent = noise
 
-                block_mem = 780000000
+                block_mem = 790000000
+                if self.load_as_fp8:
+                    block_mem = block_mem/2
                 blocks_in_ram = int(get_free_ram() / block_mem)
-                free_memory, total_memory = torch.cuda.mem_get_info()
 
-                k = 0.0000001
-                d = 1.2
-                if w > 700 or h > 700:
-                    d = 2.4
-                if w > 800 or h > 800:
-                    d = 3.5
-                if w > 900 or h > 900:
-                    d = 4.6
-                if w > 1300 or h > 1300:
-                    d = 5.2
-                mem_need = max_area * k * frame_num + d + frame_num * 0.035
-                blocks_in_vram =  int(((total_memory - mem_need * 1024 * 1024 * 1024)) / block_mem)
+                fk = (frame_num - 1) / 4 + 1
+                x_sixe = 5120 * (((w/8) * (h/8)) / 4 * fk) * 2
+                mem_need = (x_sixe * 23) / 1024 / 1024 / 1024 + (0.79 * 2) + 1
+                blocks_in_vram = int(((total_memory - mem_need * 1024 * 1024 * 1024)) / block_mem)
+                if blocks_in_vram < 0:
+                    blocks_in_vram = 0
 
                 torch.backends.cudnn.benchmark = True
 
                 if blocks_in_ram > 40 - blocks_in_vram:
                     blocks_in_ram = 40 - blocks_in_vram
 
-                if self.without_neg_prompt:
-                    context_null = None
-
                 it = 1
                 model = None
                 for _, t in enumerate(tqdm(timesteps)):
-                    print(f"\nTimestep: {t}")
                     latent_model_input = [latent.to(self.device)]
                     timestep = [t]
                     timestep = torch.stack(timestep).to(self.device)
 
                     if t.item() >= boundary:
-                        # high
                         if not self.high_noise_model:
-                            print(f"\nLoading high_noise_checkpoint")
-                            with autocast(True, dtype=torch.bfloat16):
-                                self.high_noise_model = WanModel.from_pretrained(
-                                    self.checkpoint_dir,
-                                    subfolder=self.config.high_noise_checkpoint,
-                                    model_type='i2v_h', blocks_in_ram=blocks_in_ram,
-                                    blocks_in_vram=blocks_in_vram
-                                )
-                                self.high_noise_model = self._configure_model(
-                                    model=self.high_noise_model,
-                                    use_sp=self.use_sp,
-                                    dit_fsdp=self.dit_fsdp,
-                                    shard_fn=self.shard_fn,
-                                    convert_model_dtype=self.convert_model_dtype)
-                                self.high_noise_model.to('cuda')
-                                self.high_noise_model.eval().requires_grad_(False)
-
-                                model = self.high_noise_model
+                            # print(f"\nLoading high_noise_checkpoint")
+                            self.high_noise_model = WanModel.from_pretrained(
+                                self.checkpoint_dir,
+                                subfolder=self.config.high_noise_checkpoint,
+                                model_type='i2v_h', blocks_in_ram=blocks_in_ram,
+                                blocks_in_vram=blocks_in_vram, load_as_fp8=self.load_as_fp8
+                            )
+                            model = self.high_noise_model
                     else:
-                        # low
                         if not self.low_noise_model:
                             model = None
                             self.high_noise_model.clear_mem()
@@ -613,24 +549,14 @@ class WanI2VLocal:
                             self.high_noise_model = None
                             gc.collect()
                             torch.cuda.empty_cache()
-                            print(f"\nLoading low_noise_checkpoint")
-                            with autocast(True, dtype=torch.bfloat16):
-                                self.low_noise_model = WanModel.from_pretrained(
-                                    self.checkpoint_dir,
-                                    subfolder=self.config.low_noise_checkpoint,
-                                    model_type='i2v_l', blocks_in_ram=blocks_in_ram,
-                                    blocks_in_vram=blocks_in_vram
-                                )
-                                self.low_noise_model = self._configure_model(
-                                    model=self.low_noise_model,
-                                    use_sp=self.use_sp,
-                                    dit_fsdp=self.dit_fsdp,
-                                    shard_fn=self.shard_fn,
-                                    convert_model_dtype=self.convert_model_dtype)
-                                self.low_noise_model.to('cuda')
-                                self.low_noise_model.eval().requires_grad_(False)
-
-                                model = self.low_noise_model
+                            # print(f"\nLoading low_noise_checkpoint")
+                            self.low_noise_model = WanModel.from_pretrained(
+                                self.checkpoint_dir,
+                                subfolder=self.config.low_noise_checkpoint,
+                                model_type='i2v_l', blocks_in_ram=blocks_in_ram,
+                                blocks_in_vram=blocks_in_vram, load_as_fp8=self.load_as_fp8
+                            )
+                            model = self.low_noise_model
                     it += 1
                     noise_pred_cond, noise_pred_uncond = model(
                         x=latent_model_input,
@@ -640,13 +566,10 @@ class WanI2VLocal:
                         seq_len=max_seq_len,
                         y=[y]
                     )
-                    if self.without_neg_prompt:
-                        noise_pred = noise_pred_cond[0]
-                    else:
-                        sample_guide_scale = guide_scale[1] \
-                            if t.item() >= boundary else guide_scale[0]
-                        noise_pred = noise_pred_uncond[0] + sample_guide_scale \
-                                     * (noise_pred_cond[0] - noise_pred_uncond[0])
+                    sample_guide_scale = guide_scale[1] \
+                        if t.item() >= boundary else guide_scale[0]
+                    noise_pred = noise_pred_uncond[0] + sample_guide_scale \
+                                 * (noise_pred_cond[0] - noise_pred_uncond[0])
 
                     temp_x0 = sample_scheduler.step(
                         noise_pred.unsqueeze(0),
@@ -656,7 +579,7 @@ class WanI2VLocal:
                         generator=seed_g)[0]
                     latent = temp_x0.squeeze(0)
 
-                print("Denoising complete. Offloading main models...")
+                logging.info("Denoising complete. Offloading main models...")
                 self.low_noise_model.clear_mem()
                 del self.low_noise_model, model, sample_scheduler, noise
                 self.low_noise_model = None
@@ -666,29 +589,29 @@ class WanI2VLocal:
                 x0 = [latent]
                 del latent_model_input, timestep
                 end_inference = time.time_ns()
-                print(f"Inference time: {(end_inference - start_inference) / 1000000000} sec")
+                logging.info(f"Inference time: {(end_inference - start_inference) / 1000000000} sec")
 
-                print(f"Saving final latents to: {latent_file_path}")
+                logging.info(f"Saving final latents to: {latent_file_path}")
                 torch.save(x0, latent_file_path)
                 exit()
         else:
             if os.path.exists(latent_file_path):
-                print("--- STAGE 2: Found pre-computed latents. Decoding with VAE. ---")
-
-                print(f"Loading latents from: {latent_file_path}")
+                logging.info("--- STAGE 2: Found pre-computed latents. Decoding with VAE. ---")
+                logging.info(f"Loading latents from: {latent_file_path}")
                 x0 = torch.load(latent_file_path)
+                x0 = [el.to(dtype=dtype_c) for el in x0]
 
         if self.rank == 0:
-            print("Loading VAE")
+            logging.info("Loading VAE")
             self.vae = Wan2_1_VAE(
                 vae_pth=os.path.join(self.checkpoint_dir, self.config.vae_checkpoint),
                 device=self.device,
-                dtype=torch.bfloat16)
+                dtype=dtype_c)
 
             start_decode = time.time_ns()
             videos = self.vae.decode(x0)
             end_decode = time.time_ns()
-            print(f"VAE decode: {(end_decode-start_decode)/1000000000} sec")
+            logging.info(f"VAE decode: {(end_decode-start_decode)/1000000000} sec")
 
             self.vae = None
             gc.collect()

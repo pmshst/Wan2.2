@@ -18,6 +18,7 @@ import warnings
 __all__ = [
     'flash_attention',
     'attention',
+    'flash_attention_single',
 ]
 
 
@@ -128,6 +129,89 @@ def flash_attention(
 
     # output
     return x.type(out_dtype)
+
+
+def flash_attention_single(
+    q,
+    k,
+    v,
+    q_lens=None,
+    k_lens=None,
+    dropout_p=0.,
+    softmax_scale=None,
+    q_scale=None,
+    causal=False,
+    window_size=(-1, -1),
+    deterministic=False,
+    dtype=torch.bfloat16,
+    version=None,
+):
+    """
+    A highly optimized FlashAttention wrapper for a single sequence (no batch dimension).
+
+    Args:
+        q:              [Lq, Nq, C1]. Query tensor.
+        k:              [Lk, Nk, C1]. Key tensor.
+        v:              [Lk, Nk, C2]. Value tensor. Nq must be divisible by Nk.
+        dropout_p:      float. Dropout probability.
+        softmax_scale:  float. The scaling of QK^T before applying softmax.
+        causal:         bool. Whether to apply causal attention mask.
+        window_size:    (left, right). If not (-1, -1), apply sliding window local attention.
+        deterministic:  bool. If True, slightly slower and uses more memory.
+        dtype:          torch.dtype. The computation dtype (bf16 or fp16).
+    """
+    half_dtypes = (torch.float16, torch.bfloat16)
+    assert q.device.type == 'cuda', "Input tensors must be on a CUDA device."
+    assert q.ndim == 3 and k.ndim == 3 and v.ndim == 3, "Input tensors must be 3-dimensional [L, N, C]."
+    assert q.size(-1) <= 256, "FlashAttention head dimension must be <= 256."
+    assert dtype in half_dtypes, "Computation dtype must be float16 or bfloat16."
+
+    original_q_dtype = q.dtype
+    lq, lk = q.size(0), k.size(0)
+
+    q = q.to(dtype, non_blocking=True) if q.dtype not in half_dtypes else q
+    k = k.to(dtype, non_blocking=True) if k.dtype not in half_dtypes else k
+    v = v.to(dtype, non_blocking=True) if v.dtype not in half_dtypes else v
+
+    cu_seqlens_q = torch.tensor([0, lq], dtype=torch.int32, device=q.device)
+    cu_seqlens_k = torch.tensor([0, lk], dtype=torch.int32, device=k.device)
+
+    use_fa3 = FLASH_ATTN_3_AVAILABLE
+    if use_fa3 and (dropout_p > 0.0 or window_size != (-1, -1)):
+        warnings.warn("FlashAttention 3 does not support dropout or window_size; falling back to v2.")
+        use_fa3 = False
+
+    if use_fa3:
+        output = flash_attn_interface.flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=lq,
+            max_seqlen_k=lk,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            deterministic=deterministic,
+        )[0]
+    else:
+        assert FLASH_ATTN_2_AVAILABLE, "FlashAttention 2 is not available."
+        output = flash_attn.flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=lq,
+            max_seqlen_k=lk,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            deterministic=deterministic,
+        )
+
+    return output.to(original_q_dtype)
 
 
 def attention(
