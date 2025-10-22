@@ -93,6 +93,11 @@ https://github.com/user-attachments/assets/154df173-88d3-4ad1-b543-f7410380b13a
                                                    76.49 s/it * 16 = 1224 sec
                                                                       +58 sec
                                                                      1282 sec  1.24x faster !!
+
+    1568*896 13 frames * 10 steps                  63.88 s/it * 10 = 638.8 sec 
+                                  OOM                                 +284 sec
+                                                                     922.8 sec 
+                     
 *fp8 - 3070 Ti doesn`t support calculations in fp8, loaded weights in fp8 converting for calculations to fp16 "on the fly"            
 
 Visualy hard to notice diference in quality between fp8 and fp16..
