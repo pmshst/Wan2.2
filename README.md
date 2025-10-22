@@ -87,15 +87,15 @@ https://github.com/user-attachments/assets/154df173-88d3-4ad1-b543-f7410380b13a
               ComfyUA (fp8)                        This (fp16) optimized vae
     1120*630 33 frames * 16 steps 1470 sec         85.10 s/it * 16 = 1362 sec 
     vae decode                    +117 sec                           +58 sec    
-    total                         1587 sec                          1420 sec    1.12x faster 
+    total                         1587 sec                          1420 sec   1.12x faster 
                                                    
                                                    This (*fp8) optimized vae
                                                    76.49 s/it * 16 = 1224 sec
                                                                       +58 sec
                                                                      1282 sec  1.24x faster !!
 
-    1568*896 13 frames * 10 steps                  63.88 s/it * 10 = 638.8 sec 
-                                  OOM                                 +284 sec
+    1568*896 13 frames * 10 steps 69.31 s/it       63.88 s/it * 10 = 638.8 sec 
+                                    OOM                               +284 sec
                                                                      922.8 sec 
                      
 *fp8 - 3070 Ti doesn`t support calculations in fp8, loaded weights in fp8 converting for calculations to fp16 "on the fly"            
