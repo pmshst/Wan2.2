@@ -279,10 +279,10 @@ class WanI2VLocal:
             guide_scale, float) else guide_scale
         img = TF.to_tensor(img).sub_(0.5).div_(0.5).to(self.device, dtype=dtype_c)
 
-        # sampling_steps = 16  # 16+ best (high res 1280*720), 25+ (low res 640*360)
+        sampling_steps = 16  # 16+ best (high res 1280*720), 25+ (low res 640*360)
         # max_area = 720 * 1280 default
 
-        # max_area = 720*405
+        # max_area = 1280*720
 
         # size 640*352
         # 81 frames             58.23 s/it 51.32 s/it (*FP8)
@@ -293,7 +293,7 @@ class WanI2VLocal:
         # frame_num = 81        77.50 s/it (FP16)
 
         # size 720*405, sampling_steps 20+
-        # frame_num = 17        21.23 s/it (FP16)
+        # frame_num = 17        21.23 s/it (FP16)        vae decode 5.4 sec
         # frame_num = 77        82.11 s/it (FP16)
         # frame_num = 81 (best) 70.74 s/it (*FP8)        vae decode 12.2 sec
 
@@ -307,26 +307,36 @@ class WanI2VLocal:
         # 41 frames             75.02 s/it (FP16)
         # 45 frames             72.35 s/it (*FP8)       vae decode 11.7 sec
 
-        ######################################################
-        # for 8gb vram and sizes > 960*540 vae use slow shared video memory
-
         # size = 1120 * 630
-        # 13 frames         29.24 s/it (*FP8)           vae decode 18 sec
-        # 33 frames (max)   85.10 s/it (FP16)           vae decode 57.93sec (10.1Gb)
+        # 13 frames         29.24 s/it (*FP8)
+        # 17 frames         37.90 s/it (*FP8)           vae decode 13.6 sec
+        # 33 frames (max)   85.10 s/it (FP16)
         # 33 frames         76.49 s/it (*FP8)
-        # 37                85.16 s/it (*FP8)           vae decode 75.73sec
+        # 37                85.16 s/it (*FP8)
+
+        ######################################################
+        # for 8gb vram and sizes > 1120 * 630 vae use slow shared video memory
 
         # size 1280*720, sampling_steps 16+
-        # 13 frames         48.70 s/it (FP16)           vae decode 99 sec
-        # 13 frames         39.61 s/it (*FP8)
+        # 13 frames         48.70 s/it (FP16)
+        # 13 frames         39.61 s/it (*FP8)          vae decode 17.4 sec
         # 17 frames         60.74 s/it (FP16)
         # 17 frames         54.02 s/it (*FP8)
         # 21 frames (max)   72.22 s/it (FP16)
-        # 21 frames         66.18 s/it (*FP8)           vae decode 152 sec
+        # 21 frames         66.18 s/it (*FP8)           vae decode 28 sec
 
         # size 1600*896 / 1568*896, sampling_steps 15+
         # 13 frames (max)   85.47 s/it (FP16)
-        # 13 frames (max)   63.88 s/it (*FP8)           vae decode 284 sec
+        # 13 frames (max)   63.88 s/it (*FP8)           vae decode ~115 sec
+
+        self.offload_large_tensors = False  # slower 20% inference but more frames per video
+        # ################# large tensors offloading ##########################
+
+        # 1280*720
+        # 33 frames         118.83 s/it (*FP8)          vae decode 38 sec
+
+        # 1568*896
+        # 21 frames         127.01 s/it (*FP8)          vae decode: 182 sec
 
         self.infinity_loop = True  # for generating long videos (continued from the last frame)
         self.load_as_fp8 = True  # use 2x less ram, 10% faster
@@ -348,6 +358,8 @@ class WanI2VLocal:
             frame_num_limit = self.get_frames_from_y(w * h)
             if frame_num_limit < 81:
                 frame_num = frame_num_limit
+
+        #frame_num = 13
 
         F = frame_num
 
@@ -468,7 +480,7 @@ class WanI2VLocal:
                             0, 1),
                         torch.zeros(3, F - 1, h, w)
                     ],
-                        dim=1).to(self.device)
+                        dim=1).to(self.device, dtype=dtype_c)
                 ])[0]
                 torch.save(y, "./y_latents.pt")
                 logging.info("y_latents prepared, run again to start inference")
@@ -524,6 +536,9 @@ class WanI2VLocal:
                 if blocks_in_ram > 40 - blocks_in_vram:
                     blocks_in_ram = 40 - blocks_in_vram
 
+                blocks_in_ram = 40
+                blocks_in_vram = 0
+
                 it = 1
                 model = None
                 for _, t in enumerate(tqdm(timesteps)):
@@ -538,7 +553,8 @@ class WanI2VLocal:
                                 self.checkpoint_dir,
                                 subfolder=self.config.high_noise_checkpoint,
                                 model_type='i2v_h', blocks_in_ram=blocks_in_ram,
-                                blocks_in_vram=blocks_in_vram, load_as_fp8=self.load_as_fp8
+                                blocks_in_vram=blocks_in_vram, load_as_fp8=self.load_as_fp8,
+                                offload_large_tensors=self.offload_large_tensors
                             )
                             model = self.high_noise_model
                     else:
@@ -554,7 +570,8 @@ class WanI2VLocal:
                                 self.checkpoint_dir,
                                 subfolder=self.config.low_noise_checkpoint,
                                 model_type='i2v_l', blocks_in_ram=blocks_in_ram,
-                                blocks_in_vram=blocks_in_vram, load_as_fp8=self.load_as_fp8
+                                blocks_in_vram=blocks_in_vram, load_as_fp8=self.load_as_fp8,
+                                offload_large_tensors = self.offload_large_tensors
                             )
                             model = self.low_noise_model
                     it += 1

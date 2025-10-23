@@ -1,7 +1,6 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 
-# changed to run inference on 8GB VRAM
-# (generated frames limited to 21, increase if you have more VRAM)
+# optimized to run inference on 8GB VRAM
 import gc
 import math
 import torch
@@ -10,21 +9,17 @@ import logging
 import torch.nn as nn
 import safetensors.torch
 
-from typing import List
-
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
-from .attention import flash_attention
+from .attention import flash_attention, flash_attention_single
 
 from torch.nn import functional as F, init
 from torch import Tensor
 
-from safetensors import safe_open
-
 logging.basicConfig(level=logging.DEBUG)
 
-from line_profiler import profile
+#from line_profiler import profile
 #from memory_profiler import profile
 
 # for 3070 torch.float16 faster
@@ -163,7 +158,8 @@ class nnLinear(nn.Module):
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             init.uniform_(self.bias, -bound, bound)
 
-    def forward(self, input: Tensor) -> Tensor:
+    #@profile
+    def forward(self, input: Tensor, source="", i=None) -> Tensor:
         if self.cache:
             x = F.linear(input, self.cache['w'], self.cache['b'])
             self.cache = {}
@@ -171,6 +167,24 @@ class nnLinear(nn.Module):
         self.cache['w'] = self.weight
         self.cache['b'] = self.bias
         return F.linear(input, self.cache['w'], self.cache['b'])
+        #print(source)
+        #print(self.weight.size())
+        if source == "qkv_fn q":
+            return F.linear(input, self.weight, self.bias)
+        if source == "qkv_fn k":
+            return F.linear(input, self.weight, self.bias)
+        if source == "qkv_fn v":
+            return F.linear(input, self.weight, self.bias)
+        if source == "qkv_fn o":
+            return F.linear(input, self.weight, self.bias)
+        if source == "q cross":
+            return F.linear(input, self.weight, self.bias)
+        if source == "k cross":
+            return F.linear(input, self.weight, self.bias)
+        if source == "v cross":
+            return F.linear(input, self.weight, self.bias)
+        if source == "o cross":
+            return F.linear(input, self.weight, self.bias)
 
         #return F.linear(input, self.weight, self.bias)
 
@@ -183,7 +197,7 @@ class DynamicSwapInstaller:
     def _install_module(module: torch.nn.Module, **kwargs):
         original_class = module.__class__
         module.__dict__['forge_backup_original_class'] = original_class
-        @profile
+
         def hacked_get_attr(self, name: str):
             if '_parameters' in self.__dict__:
                 _parameters = self.__dict__['_parameters']
@@ -224,7 +238,7 @@ class DynamicSwapInstaller2:
     def _install_module(module: torch.nn.Module, **kwargs):
         original_class = module.__class__
         module.__dict__['forge_backup_original_class'] = original_class
-        @profile
+
         def hacked_get_attr(self, name: str):
             if '_parameters' in self.__dict__:
                 _parameters = self.__dict__['_parameters']
@@ -523,8 +537,8 @@ class WanSelfAttention(nn.Module):
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
-    @profile
-    def forward(self, x, seq_lens, grid_sizes):
+    #@profile
+    def forward(self, x, seq_lens, grid_sizes, i):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
@@ -536,29 +550,44 @@ class WanSelfAttention(nn.Module):
 
         # query, key, value function
         def qkv_fn(x):
-            q = self.norm_q(self.q(x)).view(b, s, n, d)
-            k = self.norm_k(self.k(x)).view(b, s, n, d)
-            v = self.v(x).view(b, s, n, d)
+            q = self.norm_q(self.q(x, "qkv_fn q")).view(b, s, n, d)
+            k = self.norm_k(self.k(x, "qkv_fn k")).view(b, s, n, d)
+            v = self.v(x, "qkv_fn v").view(b, s, n, d)
             return q, k, v
 
         q, k, v = qkv_fn(x)
+        q = rope_apply(q, grid_sizes)
+        k = rope_apply(k, grid_sizes)
 
-        x = flash_attention(
-            q=rope_apply(q, grid_sizes),
-            k=rope_apply(k, grid_sizes),
-            v=v,
+        #x = flash_attention(
+        #    q=q,
+        #    k=k,
+        #    v=v,
+        #    k_lens=seq_lens,
+        #    window_size=self.window_size)
+        #print(x)
+
+
+        x = flash_attention_single(
+            q=q[0],
+            k=k[0],
+            v=v[0],
             k_lens=seq_lens,
             window_size=self.window_size)
+        x.unsqueeze(0)
 
         # output
         x = x.flatten(2)
-        x = self.o(x)
+        def o_func(x):
+            return self.o(x, "qkv_fn o", i)
+
+        x = o_func(x)
         return x
 
 
 class WanCrossAttention(WanSelfAttention):
 
-    def forward(self, x, context, context_lens):
+    def forward(self, x, context, context_lens, i):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
@@ -568,16 +597,16 @@ class WanCrossAttention(WanSelfAttention):
         b, n, d = x.size(0), self.num_heads, self.head_dim
 
         # compute query, key, value
-        q = self.norm_q(self.q(x)).view(b, -1, n, d)
-        k = self.norm_k(self.k(context)).view(b, -1, n, d)
-        v = self.v(context).view(b, -1, n, d)
+        q = self.norm_q(self.q(x, "q cross")).view(b, -1, n, d)
+        k = self.norm_k(self.k(context, "k cross")).view(b, -1, n, d)
+        v = self.v(context, "v cross").view(b, -1, n, d)
 
         # compute attention
         x = flash_attention(q, k, v, k_lens=context_lens)
 
         # output
         x = x.flatten(2)
-        x = self.o(x)
+        x = self.o(x, "o cross")
         return x
 
 
@@ -651,38 +680,38 @@ class WanAttentionBlock(nn.Module):
 
         return cross_attn_ffn(x, context, context_lens), cross_attn_ffn(x_null, context_null, context_lens)
 
-    @profile
-    def do_cross_attn(self, x, x_null, e, context, context_null, context_lens):
+    #@profile
+    def do_cross_attn(self, x, x_null, e, context, context_null, context_lens, i):
         if self.cache:
             modulation = self.cache['modulation']
             self.cache = {}
         else:
             self.cache['modulation'] = self.modulation
             modulation = self.cache['modulation']
-        e_cf_combined = modulation.unsqueeze(0)[:, :, 3:, :] + e[:, :, 3:, :]
+        e_cf_combined = modulation.unsqueeze(0)[:, :, 3:, :] + e.to('cuda')#[:, :, 3:, :]
         e_cf = e_cf_combined.chunk(3, dim=2)
 
-        x = x + self.cross_attn(self.norm3(x), context, context_lens)
+        x = x + self.cross_attn(self.norm3(x), context, context_lens, i)
         x = x + self.ffn(self.norm2(x) * (1 + e_cf[1].squeeze(2)) + e_cf[0].squeeze(2)) * e_cf[2].squeeze(2)
 
-        x_null = x_null + self.cross_attn(self.norm3(x_null), context_null, context_lens)
+        x_null = x_null + self.cross_attn(self.norm3(x_null), context_null, context_lens, i)
         x_null = x_null + self.ffn(self.norm2(x_null) * (1 + e_cf[1].squeeze(2)) + e_cf[0].squeeze(2)) * e_cf[2].squeeze(2)
 
         return x, x_null
 
-    @profile
-    def do_attn(self, x, x_null, e, seq_lens, grid_sizes):
+    #@profile
+    def do_attn(self, x, x_null, e, seq_lens, grid_sizes, i):
         if self.cache:
             modulation = self.cache['modulation']
             self.cache = {}
         else:
             self.cache['modulation'] = self.modulation
             modulation = self.cache['modulation']
-        e_sa_combined = modulation.unsqueeze(0)[:, :, :3, :] + e[:, :, :3, :]
+        e_sa_combined = modulation.unsqueeze(0)[:, :, :3, :] + e.to('cuda')#[:, :, :3, :]
         e_sa = e_sa_combined.chunk(3, dim=2)
 
-        x = x + self.self_attn(self.norm1(x) * (1 + e_sa[1].squeeze(2)) + e_sa[0].squeeze(2), seq_lens, grid_sizes) * e_sa[2].squeeze(2)
-        x_null = x_null + self.self_attn(self.norm1(x_null) * (1 + e_sa[1].squeeze(2)) + e_sa[0].squeeze(2), seq_lens, grid_sizes) * e_sa[2].squeeze(2)
+        x = x + self.self_attn(self.norm1(x) * (1 + e_sa[1].squeeze(2)) + e_sa[0].squeeze(2), seq_lens, grid_sizes, i) * e_sa[2].squeeze(2)
+        x_null = x_null + self.self_attn(self.norm1(x_null) * (1 + e_sa[1].squeeze(2)) + e_sa[0].squeeze(2), seq_lens, grid_sizes, i) * e_sa[2].squeeze(2)
 
         return x, x_null
 
@@ -746,7 +775,7 @@ class WanModel(ModelMixin, ConfigMixin):
         gc.collect()
         torch.cuda.empty_cache()
 
-    @profile
+    #@profile
     def _load_and_move_part_v1(self, part_name: str, part_class, *args, **kwargs):
         file_path = self.model_path + part_name + '.safetensors'
         attr_name = part_name.replace(".", "")
@@ -825,7 +854,8 @@ class WanModel(ModelMixin, ConfigMixin):
                  eps=1e-6,
                  blocks_in_ram=0,
                  blocks_in_vram=0,
-                 load_as_fp8=False):
+                 load_as_fp8=False,
+                 offload_large_tensors=False):
         r"""
         Initialize the diffusion model backbone.
 
@@ -864,6 +894,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
         super().__init__()
         self.load_as_fp8 = load_as_fp8
+        self.offload_large_tensors = offload_large_tensors
         self.in_dim = in_dim
         if model_type == 'i2v_h' or model_type == 'i2v_l':
             self.in_dim = 36
@@ -946,7 +977,7 @@ class WanModel(ModelMixin, ConfigMixin):
         self.blocks_in_vram = blocks_in_vram
         logging.debug(f"\nVRAM available for {self.blocks_in_vram}/{self.num_layers} blocks\n")
 
-    @profile
+    #@profile
     def forward(
             self,
             x,
@@ -1019,10 +1050,22 @@ class WanModel(ModelMixin, ConfigMixin):
 
         e = self.time_embedding(sin_embed) # +0.21Gb
 
+
         del sin_embed
 
         #e0 = self.time_projection(e).unflatten(2, (6, self.dim))
-        self.register_buffer("e0", self.time_projection(e).unflatten(2, (6, self.dim)))
+        #self.register_buffer("e0", self.time_projection(e).unflatten(2, (6, self.dim)))
+
+        e0 = self.time_projection(e).unflatten(2, (6, self.dim))
+        if self.offload_large_tensors:
+            e01 = e0[:, :, :3, :].to('cpu')
+            e02 = e0[:, :, 3:, :].to('cpu')
+            e = e.to("cpu")
+        else:
+            e01 = e0[:, :, :3, :]
+            e02 = e0[:, :, 3:, :]
+
+        del e0
 
         if not self.text_embedding:
             logging.debug("Loading text_embedding")
@@ -1073,8 +1116,8 @@ class WanModel(ModelMixin, ConfigMixin):
             end_l = time.time_ns()
             start_t = time.time_ns()
 
-            x, x_null = block.do_attn(x, x_null, self.e0, seq_lens, grid_sizes)
-            x, x_null = block.do_cross_attn(x, x_null, self.e0, context, context_null, None)
+            x, x_null = block.do_attn(x, x_null, e01, seq_lens, grid_sizes, i)
+            x, x_null = block.do_cross_attn(x, x_null, e02, context, context_null, None, i)
 
             end_t = time.time_ns()
             logging.debug(f"Inference time: {(end_t-start_t)/1000000} ms,  load time: {(end_l-start_l)/1000000} ms")
@@ -1090,6 +1133,8 @@ class WanModel(ModelMixin, ConfigMixin):
                 patch_size=self.patch_size,
                 eps=self.eps
             )
+        if self.offload_large_tensors:
+            e = e.to("cuda")
         x = self.head(x, e)
         x_null = self.head(x_null, e)
         del e

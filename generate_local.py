@@ -79,10 +79,10 @@ def _validate_args(args):
     args.base_seed = args.base_seed if args.base_seed >= 0 else random.randint(
         0, sys.maxsize)
     # Size check
-    if not 's2v' in args.task:
-        assert args.size in SUPPORTED_SIZES[
-            args.
-            task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
+    #if not 's2v' in args.task:
+    #    assert args.size in SUPPORTED_SIZES[
+    #        args.
+    #        task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
 
 
 def _parse_args():
@@ -99,7 +99,7 @@ def _parse_args():
         "--size",
         type=str,
         default="1280*720",
-        choices=list(SIZE_CONFIGS.keys()),
+        # choices=list(SIZE_CONFIGS.keys()),
         help="The area (width*height) of the generated video. For the I2V task, the aspect ratio of the output video will follow that of the input image."
     )
     parser.add_argument(
@@ -440,10 +440,11 @@ def generate(args):
         )
 
         logging.info("Generating video ...")
+        size = args.size.split("*")
         video = wan_i2v.generate(
             args.prompt,
             img,
-            max_area=MAX_AREA_CONFIGS[args.size],
+            max_area=int(size[0])*int(size[1]),
             frame_num=args.frame_num,
             shift=args.sample_shift,
             sample_solver=args.sample_solver,

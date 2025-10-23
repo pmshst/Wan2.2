@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+import gc
 
 DTYPE = torch.float16
 
@@ -67,6 +68,62 @@ class Upsample(nn.Upsample):
         """
         return super().forward(x).type_as(x)
 
+def print_gpu_memory_report():
+    print("--- PyTorch CUDA Memory Summary ---")
+    print(torch.cuda.memory_summary())
+
+    allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+    reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+    print(f"Current Memory (Allocated by Tensors): {allocated:.2f} GB")
+    print(f"Cached Memory (Reserved by PyTorch):   {reserved:.2f} GB")
+    print("-" * 40)
+    print("\n")
+
+    print("--- Detailed CUDA Tensor Breakdown ---")
+    all_objects = gc.get_objects()
+    cuda_tensors = [
+        obj for obj in all_objects
+        if torch.is_tensor(obj) and obj.is_cuda
+    ]
+
+    if not cuda_tensors:
+        print("No CUDA tensors found in memory by the garbage collector.")
+        return
+
+    table_data = []
+    total_size_mb = 0
+    for tensor in cuda_tensors:
+        size_bytes = tensor.nelement() * tensor.element_size()
+        size_mb = size_bytes / (1024 * 1024)
+        total_size_mb += size_mb
+
+        table_data.append({
+            "id": id(tensor),
+            "device": tensor.device,
+            "size_mb": size_mb,
+            "dtype": tensor.dtype,
+            "shape": tuple(tensor.shape),
+        })
+
+    table_data.sort(key=lambda x: x['size_mb'], reverse=True)
+
+    header = f"{'ID':>15} | {'Device':<10} | {'Size (MB)':>12} | {'Dtype':<18} | {'Shape'}"
+    print(header)
+    print("-" * 100)
+    for item in table_data:
+        row = (
+            f"{item['id']:>15} | "
+            f"{str(item['device']):<10} | "
+            f"{item['size_mb']:>12.2f} | "
+            f"{str(item['dtype']):<18} | "
+            f"{item['shape']}"
+        )
+        print(row)
+
+    print("-" * 100)
+    print(f"Total Tensors Found: {len(table_data)}")
+    print(f"Total Size of Tensors (from gc): {total_size_mb / 1024:.2f} GB ({total_size_mb:.2f} MB)")
+    print("-" * 100)
 
 class Resample(nn.Module):
 
@@ -133,8 +190,8 @@ class Resample(nn.Module):
                     if feat_cache[idx] == 'Rep':
                         x = self.time_conv(x)
                     else:
-                        x = self.time_conv(x, feat_cache[idx])
-                    feat_cache[idx] = cache_x
+                        x = self.time_conv(x, feat_cache[idx].to("cuda"))
+                    feat_cache[idx] = cache_x.to("cpu")
                     feat_idx[0] += 1
 
                     x = x.reshape(b, 2, c, t, h, w)
@@ -150,7 +207,7 @@ class Resample(nn.Module):
             if feat_cache is not None:
                 idx = feat_idx[0]
                 if feat_cache[idx] is None:
-                    feat_cache[idx] = x.clone()
+                    feat_cache[idx] = x.clone().to("cpu")
                     feat_idx[0] += 1
                 else:
 
@@ -160,8 +217,8 @@ class Resample(nn.Module):
                     #     cache_x = torch.cat([feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device), cache_x], dim=2)
 
                     x = self.time_conv(
-                        torch.cat([feat_cache[idx][:, :, -1:, :, :], x], 2))
-                    feat_cache[idx] = cache_x
+                        torch.cat([feat_cache[idx][:, :, -1:, :, :].to("cuda"), x], 2))
+                    feat_cache[idx] = cache_x.to("cpu")
                     feat_idx[0] += 1
         return x
 
@@ -216,8 +273,8 @@ class ResidualBlock(nn.Module):
                     cache_x = torch.cat(
                         [feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device), cache_x],
                         dim=2)
-                x = layer(x, feat_cache[idx])
-                feat_cache[idx] = cache_x
+                x = layer(x, feat_cache[idx].to("cuda") if feat_cache[idx] is not None else None)
+                feat_cache[idx] = cache_x.to("cpu")
                 feat_idx[0] += 1
             else:
                 x = layer(x)
@@ -348,8 +405,8 @@ class Encoder3d(nn.Module):
                         cache_x.device), cache_x
                 ],
                                     dim=2)
-            x = self.conv1(x, feat_cache[idx])
-            feat_cache[idx] = cache_x
+            x = self.conv1(x, feat_cache[idx].to("cuda") if feat_cache[idx] is not None else None)
+            feat_cache[idx] = cache_x.to("cpu")
             feat_idx[0] += 1
         else:
             x = self.conv1(x)
@@ -380,8 +437,8 @@ class Encoder3d(nn.Module):
                             cache_x.device), cache_x
                     ],
                                         dim=2)
-                x = layer(x, feat_cache[idx])
-                feat_cache[idx] = cache_x
+                x = layer(x, feat_cache[idx].to("cuda") if feat_cache[idx] is not None else None)
+                feat_cache[idx] = cache_x.to("cpu")
                 feat_idx[0] += 1
             else:
                 x = layer(x)
