@@ -209,7 +209,7 @@ def flash_attention_single(
             causal=causal,
             window_size=window_size,
             deterministic=deterministic,
-        )
+        ).unflatten(0, (1, lq))
 
     return output.to(original_q_dtype)
 
