@@ -39,7 +39,7 @@ https://github.com/user-attachments/assets/154df173-88d3-4ad1-b543-f7410380b13a
 - **to start new generation loop** with new image / prompt / frame count / size - delete: **y_latents.pt**, **final_latents.pt**, **last_frame_latents.pt**
 
 ## Results on a 3070 Ti laptop GPU with 8 GB VRAM + 25 GB free RAM (some layers are loaded from the NVME drive; to fit everything in RAM, 30 GB of free RAM is needed):
-                # size 640*352
+        # size 640*352
         # 81 frames             58.23 s/it 51.32 s/it (*FP8)
         # 33 frames             23.75 s/it              vae decode 4.5 sec
 
@@ -48,7 +48,7 @@ https://github.com/user-attachments/assets/154df173-88d3-4ad1-b543-f7410380b13a
         # frame_num = 81        77.50 s/it (FP16)
 
         # size 720*405, sampling_steps 20+
-        # frame_num = 17        21.23 s/it (FP16)
+        # frame_num = 17        21.23 s/it (FP16)        vae decode 5.4 sec
         # frame_num = 77        82.11 s/it (FP16)
         # frame_num = 81 (best) 70.74 s/it (*FP8)        vae decode 12.2 sec
 
@@ -62,40 +62,50 @@ https://github.com/user-attachments/assets/154df173-88d3-4ad1-b543-f7410380b13a
         # 41 frames             75.02 s/it (FP16)
         # 45 frames             72.35 s/it (*FP8)       vae decode 11.7 sec
 
-        ######################################################
-        # for 8gb vram and sizes > 960*540 vae use slow shared video memory
-
         # size = 1120 * 630
-        # 13 frames         29.24 s/it (*FP8)           vae decode 18 sec
-        # 33 frames (max)   85.10 s/it (FP16)           vae decode 57.93sec (10.1Gb)
+        # 13 frames         29.24 s/it (*FP8)
+        # 17 frames         37.90 s/it (*FP8)           vae decode 13.6 sec
+        # 33 frames (max)   85.10 s/it (FP16)
         # 33 frames         76.49 s/it (*FP8)
-        # 37                85.16 s/it (*FP8)           vae decode 75.73sec
+        # 37                85.16 s/it (*FP8)
+
+        ######################################################
+        # for 8gb vram and sizes > 1120 * 630 vae use slow shared video memory
 
         # size 1280*720, sampling_steps 16+
-        # 13 frames         48.70 s/it (FP16)           vae decode 99 sec
-        # 13 frames         39.61 s/it (*FP8)
+        # 13 frames         48.70 s/it (FP16)
+        # 13 frames         39.61 s/it (*FP8)          vae decode 17.4 sec
         # 17 frames         60.74 s/it (FP16)
         # 17 frames         54.02 s/it (*FP8)
         # 21 frames (max)   72.22 s/it (FP16)
-        # 21 frames         66.18 s/it (*FP8)           vae decode 152 sec
+        # 21 frames         66.18 s/it (*FP8)           vae decode 28 sec
 
         # size 1600*896 / 1568*896, sampling_steps 15+
         # 13 frames (max)   85.47 s/it (FP16)
-        # 13 frames (max)   63.88 s/it (*FP8)           vae decode 284 sec
+        # 13 frames (max)   63.88 s/it (*FP8)           vae decode ~115 sec
+
+        self.offload_large_tensors = False  # slower 20% inference but more frames per video
+        # ################# large tensors offloading ##########################
+
+        # 1280*720
+        # 33 frames         118.83 s/it (*FP8)          vae decode 38 sec
+
+        # 1568*896
+        # 21 frames         127.01 s/it (*FP8)          vae decode: 182 sec
 
 # Compared to ComfyUA
               ComfyUA (fp8)                        This (fp16) optimized vae
     1120*630 33 frames * 16 steps 1470 sec         85.10 s/it * 16 = 1362 sec 
-    vae decode                    +117 sec                           +58 sec    
-    total                         1587 sec                          1420 sec   1.12x faster 
+    vae decode                    +117 sec                            +26 sec    
+    total                         1587 sec                           1388 sec  1.14x faster 
                                                    
                                                    This (*fp8) optimized vae
                                                    76.49 s/it * 16 = 1224 sec
-                                                                      +58 sec
-                                                                     1282 sec  1.24x faster !!
+                                                                      +26 sec
+                                                                     1282 sec  1.27x faster !!!
 
     1568*896 13 frames * 10 steps 69.31 s/it       63.88 s/it * 10 = 638.8 sec 
-                                    OOM                               +284 sec
+                                    OOM                               +115 sec
                                                                      922.8 sec 
                      
 *fp8 - 3070 Ti doesn`t support calculations in fp8, loaded weights in fp8 converting for calculations to fp16 "on the fly"            
