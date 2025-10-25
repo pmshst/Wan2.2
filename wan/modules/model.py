@@ -17,7 +17,7 @@ from .attention import flash_attention, flash_attention_single
 from torch.nn import functional as F, init
 from torch import Tensor
 
-logging.basicConfig(level=logging.DEBUG)
+#logging.basicConfig(level=logging.DEBUG)
 
 #from line_profiler import profile
 #from memory_profiler import profile
@@ -160,6 +160,8 @@ class nnLinear(nn.Module):
 
     #@profile
     def forward(self, input: Tensor, source="", i=None) -> Tensor:
+        #return F.linear(input, self.weight, self.bias)
+
         if self.cache:
             x = F.linear(input, self.cache['w'], self.cache['b'])
             self.cache = {}
@@ -167,26 +169,7 @@ class nnLinear(nn.Module):
         self.cache['w'] = self.weight
         self.cache['b'] = self.bias
         return F.linear(input, self.cache['w'], self.cache['b'])
-        #print(source)
-        #print(self.weight.size())
-        if source == "qkv_fn q":
-            return F.linear(input, self.weight, self.bias)
-        if source == "qkv_fn k":
-            return F.linear(input, self.weight, self.bias)
-        if source == "qkv_fn v":
-            return F.linear(input, self.weight, self.bias)
-        if source == "qkv_fn o":
-            return F.linear(input, self.weight, self.bias)
-        if source == "q cross":
-            return F.linear(input, self.weight, self.bias)
-        if source == "k cross":
-            return F.linear(input, self.weight, self.bias)
-        if source == "v cross":
-            return F.linear(input, self.weight, self.bias)
-        if source == "o cross":
-            return F.linear(input, self.weight, self.bias)
 
-        #return F.linear(input, self.weight, self.bias)
 
     def extra_repr(self) -> str:
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
@@ -400,6 +383,10 @@ class WanRMSNorm(nn.Module):
         self.cache = {}
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        #return x * torch.rsqrt(
+        #    x.pow(2).mean(-1, keepdim=True, dtype=dtype_c) + self.eps,
+        #) * self.weight
+
         if self.cache:
             x = x * torch.rsqrt(
                 x.pow(2).mean(-1, keepdim=True, dtype=dtype_c) + self.eps,
@@ -476,6 +463,8 @@ class nnLayerNorm(nn.Module):
                 init.zeros_(self.bias)
 
     def forward(self, input: Tensor) -> Tensor:
+        #return F.layer_norm(input, self.normalized_shape, self.weight, self.bias, self.eps)
+
         if self.cache:
             x = F.layer_norm(
                 input, self.normalized_shape, self.cache['w'], self.cache['b'], self.cache['e']
@@ -559,22 +548,21 @@ class WanSelfAttention(nn.Module):
         q = rope_apply(q, grid_sizes)
         k = rope_apply(k, grid_sizes)
 
-        #x = flash_attention(
-        #    q=q,
-        #    k=k,
-        #    v=v,
-        #    k_lens=seq_lens,
-        #    window_size=self.window_size)
-        #print(x)
-
-
-        x = flash_attention_single(
-            q=q[0],
-            k=k[0],
-            v=v[0],
+        x = flash_attention(
+            q=q,
+            k=k,
+            v=v,
             k_lens=seq_lens,
             window_size=self.window_size)
-        x.unsqueeze(0)
+
+
+        #x = flash_attention_single(
+        #    q=q[0],
+        #    k=k[0],
+        #    v=v[0],
+        #    k_lens=seq_lens,
+        #    window_size=self.window_size)
+        #x.unsqueeze(0)
 
         # output
         x = x.flatten(2)
@@ -1047,14 +1035,9 @@ class WanModel(ModelMixin, ConfigMixin):
         target_dtype = self.time_embedding[0].weight.dtype
         sin_embed = sin_embed.to(device, dtype=target_dtype)
 
-
-        e = self.time_embedding(sin_embed) # +0.21Gb
-
+        e = self.time_embedding(sin_embed)
 
         del sin_embed
-
-        #e0 = self.time_projection(e).unflatten(2, (6, self.dim))
-        #self.register_buffer("e0", self.time_projection(e).unflatten(2, (6, self.dim)))
 
         e0 = self.time_projection(e).unflatten(2, (6, self.dim))
         if self.offload_large_tensors:
