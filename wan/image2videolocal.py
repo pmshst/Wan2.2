@@ -286,7 +286,7 @@ class WanI2VLocal:
 
         # size 640*352
         # 81 frames             58.23 s/it 51.32 s/it (*FP8)
-        # 33 frames             23.75 s/it              vae decode 4.5 sec
+        # 33 frames             23.75 s/it 20.10 s/it (*FP8) vae decode 4.5 sec
 
         # 704 * 396, sampling_steps 25+
         # frame_num = 49        24.72 s/it (FP16)
@@ -300,7 +300,7 @@ class WanI2VLocal:
         # size 832*464 / 848*448, sampling_steps 20+
         # frame_num = 17        23.68 s/it               vae decode 3.54 sec
         # frame_num = 53        74.34 s/it
-        # 65                    79.73 s/it
+        # 65                    79.73 s/it (*FP8)
 
         # size 960*540, sampling_steps 16+
         # 17 frames             34.30 s/it (FP16)
@@ -323,7 +323,7 @@ class WanI2VLocal:
         # 17 frames         60.74 s/it (FP16)
         # 17 frames         54.02 s/it (*FP8)
         # 21 frames (max)   72.22 s/it (FP16)
-        # 21 frames         66.18 s/it (*FP8)           vae decode 28 sec
+        # 21 frames         66.18 s/it (*FP8)           vae decode 28 sec  60.72
 
         # size 1600*896 / 1568*896, sampling_steps 15+
         # 13 frames (max)   85.47 s/it (FP16)
@@ -354,7 +354,7 @@ class WanI2VLocal:
 
         free_memory, total_memory = torch.cuda.mem_get_info()
         if free_memory < 9*1024*1024*1024:
-            # limit frames
+            # limit frames to prevent OOM
             frame_num_limit = self.get_frames_from_y(w * h)
             if frame_num_limit < 81:
                 frame_num = frame_num_limit
@@ -535,9 +535,6 @@ class WanI2VLocal:
 
                 if blocks_in_ram > 40 - blocks_in_vram:
                     blocks_in_ram = 40 - blocks_in_vram
-
-                blocks_in_ram = 40
-                blocks_in_vram = 0
 
                 it = 1
                 model = None
