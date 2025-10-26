@@ -47,21 +47,10 @@ function i2v_A14B() {
     # python $PY_FILE --task i2v-A14B --size 832*480 --ckpt_dir $CKPT_DIR
 
     # Multiple GPU Test
-    echo -e "\n\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> i2v_14B Multiple GPU Test: "
-    torchrun --nproc_per_node=$GPUS $PY_FILE --task i2v-A14B --ckpt_dir $CKPT_DIR --size 832*480 --dit_fsdp --t5_fsdp --ulysses_size $GPUS
 
-    echo -e "\n\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> i2v_14B Multiple GPU, prompt extend local_qwen: "
-    torchrun --nproc_per_node=$GPUS $PY_FILE --task i2v-A14B --ckpt_dir $CKPT_DIR --size 720*1280 --dit_fsdp --t5_fsdp --ulysses_size $GPUS --use_prompt_extend --prompt_extend_model "Qwen/Qwen2.5-VL-3B-Instruct" --prompt_extend_target_lang "en"
+    echo -e "\n\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> i2v_14B Multiple GPU "
+    torchrun --nproc_per_node=$GPUS $PY_FILE --task i2v-A14B --ckpt_dir $CKPT_DIR --size 720*1280 --dit_fsdp --t5_fsdp --ulysses_size $GPUS
 
-    echo -e "\n\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> i2v_14B Multiple GPU, prompt extend local_qwen: "
-    torchrun --nproc_per_node=$GPUS $PY_FILE --task i2v-A14B --ckpt_dir $CKPT_DIR --size 1280*720 --dit_fsdp --t5_fsdp --ulysses_size $GPUS --use_prompt_extend --prompt_extend_model "Qwen/Qwen2.5-VL-3B-Instruct" --prompt_extend_target_lang "en"
-
-    if [ -n "${DASH_API_KEY+x}" ]; then
-        echo -e "\n\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> i2v_14B Multiple GPU, prompt extend dashscope: "
-        torchrun --nproc_per_node=$GPUS $PY_FILE --task i2v-A14B --ckpt_dir $CKPT_DIR --size 480*832 --dit_fsdp --t5_fsdp --ulysses_size $GPUS --use_prompt_extend --prompt_extend_method "dashscope"
-    else
-        echo -e "\n\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> No DASH_API_KEY found, skip the dashscope extend test."
-    fi
 }
 
 function ti2v_5B() {
@@ -86,6 +75,6 @@ function ti2v_5B() {
 
 }
 
-t2v_A14B
+#t2v_A14B
 i2v_A14B
-ti2v_5B
+#ti2v_5B
